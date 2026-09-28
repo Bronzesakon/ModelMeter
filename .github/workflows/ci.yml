@@ -1,0 +1,402 @@
+name: CI
+
+# 质量门 + 可安装的 NSIS 安装包（完全在云端构建）。
+#
+# 发布流（对齐 android-shell 推 CI 规范，2026-09-28）：
+#   push main-v2 -> 测试 + 打包后覆写滚动预发布 Release（tag `modelmeter-pre`，
+#                   固定资产名 + 固定下载链接，不随 push 堆积新 Release）。
+#   v* tag      -> 正式 Release，说明取自 CHANGELOG.md 的 `## [X.Y.Z]` 段。
+#   GITHUB_TOKEN 发起的事件不会递归触发本工作流，发布路径不会自套；
+#   滚动 tag 故意不带 `v` 前缀，避免匹配下面的 `tags: ['v*']` 触发条件。
+#
+# 版本号：基准取 src/tauri.conf.json 的 `version`（与 CHANGELOG 顶段一致）。
+#   分支构建注入 `<base>-dev.<yyyyMMdd.HHmm>`（UTC+8 构建时间），tag 构建用基准值。
+#   构建时间只前进，任何一次 CI 产物都能覆盖安装上一次。
+#
+# 失败可读性：Actions 的日志匿名不可读（404），而注解（::error::）会渲染进
+#   job 页面 HTML——这是无 gh/token 时唯一能读到失败原因的通道，所以构建
+#   失败时把关键错误行重新输出为注解。
+on:
+  push:
+    branches: [main-v2]
+    tags: ['v*']
+    # 只列会影响构建产物的路径；纯文档改动（README/docs）自然落在过滤外。
+    # 注意 GitHub 不允许同一事件同时用 paths 与 paths-ignore——会产生
+    # 没有任何 job 的 run（官方文档之外的实测坑）。
+    paths:
+      - 'frontend/**'
+      - 'src/**'
+      - '.github/workflows/ci.yml'
+      - 'CHANGELOG.md'
+  pull_request:
+    branches: [main-v2]
+    paths:
+      - 'frontend/**'
+      - 'src/**'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  frontend-test:
+    name: Frontend tests
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee vitest.log
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            # 关键失败行以注解重新输出，匿名也能从 job 页面读到
+            grep -aE "FAIL |AssertionError|expected|Test Files" vitest.log | head -15 | sed 's/^/::error::/' || true
+            exit "$status"
+          fi
+
+  backend-test:
+    name: Backend tests
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('src/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test 2>&1 | tee cargo-test.log
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            grep -aE "^error(\[|:)|panicked at|FAILED|failures:" cargo-test.log | head -15 | sed 's/^/::error::/' || true
+            tail -60 cargo-test.log | sed 's/^/::error::/' || true
+            exit "$status"
+          fi
+
+  # 编译 + 打包（NSIS 安装包）。PR 只跑测试，推送 main-v2 或手动触发才产出安装包。
+  package:
+    name: Build & package (NSIS)
+    needs: [frontend-test, backend-test]
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    outputs:
+      version_name: ${{ steps.version.outputs.version_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('src/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-
+
+      # 版本号在构建时一次性解析，经 output 传给发布 job——发布 job 晚几分钟
+      # 运行，重算"现在"会与实际打进安装包的版本对不上。
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          base=$(node -p "require('./src/tauri.conf.json').version")
+          if [ -z "$base" ]; then
+            echo "::error::could not read version from src/tauri.conf.json"
+            exit 1
+          fi
+          # UTC+8 构建时间，算术换算而非依赖 runner 的 tz 数据库
+          now8=$(($(date -u +%s) + 28800))
+          stamp=$(date -u -d "@$now8" '+%Y%m%d.%H%M')
+          if [ "${GITHUB_REF:0:10}" = "refs/tags/" ]; then
+            name="$base"
+          else
+            name="${base}-dev.${stamp}"
+          fi
+          echo "VERSION_NAME=$name" >> "$GITHUB_ENV"
+          echo "version_name=$name" >> "$GITHUB_OUTPUT"
+          echo "version = $name"
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Install Tauri CLI
+        run: npm install -g @tauri-apps/cli@^2
+
+      - name: Build & package
+        working-directory: src
+        shell: bash
+        run: |
+          set -o pipefail
+          tauri build --config "{\"version\":\"${VERSION_NAME}\"}" 2>&1 | tee tauri-build.log
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            grep -aE "^error(\[|:)|error:|failed to|panicked at" tauri-build.log | head -15 | sed 's/^/::error::/' || true
+            tail -60 tauri-build.log | sed 's/^/::error::/' || true
+            exit "$status"
+          fi
+
+      # 安装包名带版本号；滚动发布需要固定资产名，故统一改名为 ModelMeter-setup.exe
+      - name: Rename installer, checksum
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=target/release/bundle/nsis
+          setup=$(find "$OUT" -maxdepth 1 -name "*_x64-setup.exe" | head -1)
+          if [ -z "$setup" ]; then
+            echo "::error::NSIS installer not found under $OUT"
+            exit 1
+          fi
+          mv "$setup" "$OUT/ModelMeter-setup.exe"
+          (cd "$OUT" && md5sum ModelMeter-setup.exe > ModelMeter-setup.exe.md5 && ls -l)
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ModelMeter-windows-nsis
+          if-no-files-found: error
+          overwrite: true
+          path: |
+            src/target/release/ModelMeter.exe
+            src/target/release/bundle/nsis/ModelMeter-setup.exe
+            src/target/release/bundle/nsis/ModelMeter-setup.exe.md5
+
+  # ---------------------------------------------------------------------------
+  # push main-v2 -> 滚动预发布。同一个 Release 的资产每次覆写，固定下载链接
+  # …/releases/download/modelmeter-pre/ModelMeter-setup.exe 始终指向最新构建；
+  # 标题带应用内版本与编译时间戳，说明列本轮变更 + 推送/编译时间戳表格；
+  # tag 强移到本次构建的提交，保证 Release 页源码链接与资产一致。
+  # ---------------------------------------------------------------------------
+  prerelease:
+    name: Publish rolling pre-release
+    if: github.ref == 'refs/heads/main-v2'
+    needs: [package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ModelMeter-windows-nsis
+          path: dist
+
+      - name: Compose title and notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          name="${{ needs.package.outputs.version_name }}"
+          if [ -z "$name" ]; then
+            echo "::error::package job did not export version_name"
+            exit 1
+          fi
+          tag="modelmeter-pre"
+          notes="$GITHUB_WORKSPACE/pre-notes.md"
+          round="$GITHUB_WORKSPACE/round.txt"
+
+          # 时间戳一律 UTC+8，算术换算而非依赖 runner 的 tz 数据库
+          cst() {  # $1 = ISO 时间串，空取当前；$2 = 日期格式
+            local epoch
+            if [ -n "$1" ]; then epoch=$(date -u -d "$1" +%s); else epoch=$(date -u +%s); fi
+            date -u -d "@$((epoch + 28800))" "$2"
+          }
+          # 推送时间取提交时间而非"现在"，重跑时两个数字仍然成立
+          push_time=$(cst "$(git log -1 --pretty=%cI)" '+%Y-%m-%d %H:%M:%S')
+          build_time=$(cst '' '+%Y-%m-%d %H:%M:%S')
+          stamp=$(cst '' '+%m-%d %H:%M')
+
+          # 本轮变更 = 相对滚动 tag 当前指向的提交新增的提交列表；
+          # 首次运行（无 tag）或强推后降级为仅当前提交
+          prev=$(git ls-remote origin "refs/tags/$tag" | cut -f1)
+          count=0
+          if [ -n "$prev" ] && [ "$prev" != "$GITHUB_SHA" ]; then
+            gh api "repos/${{ github.repository }}/compare/$prev...$GITHUB_SHA" \
+              --jq '.commits[] | "- " + (.commit.message | split("\n")[0])' \
+              > "$round" 2>/dev/null || true
+            count=$(grep -c '^- ' "$round" || true)
+          fi
+
+          echo "## 本轮变更" > "$notes"
+          echo "" >> "$notes"
+          if [ "${count:-0}" -gt 0 ]; then
+            echo "共 ${count} 个提交（\`${GITHUB_SHA:0:7}\`）：" >> "$notes"
+            echo "" >> "$notes"
+            cat "$round" >> "$notes"
+            if [ "$count" -eq 1 ]; then
+              echo "" >> "$notes"
+              gh api "repos/${{ github.repository }}/commits/$GITHUB_SHA" \
+                --jq '.commit.message | split("\n")[1:] | join("\n") | sub("^\\s+"; "")' \
+                >> "$notes" 2>/dev/null || true
+            fi
+          else
+            git log -1 --pretty=%B >> "$notes"
+          fi
+          {
+            echo ""
+            echo "---"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 应用内版本 | \`$name\` |"
+            echo "| 推送时间 | $push_time（UTC+8） |"
+            echo "| 编译完成 | $build_time（UTC+8） |"
+            echo "| 来源 | \`main-v2\` 分支 · 运行 #${{ github.run_number }} |"
+            echo ""
+            echo "> 滚动发布：资产名固定，下载链接 \`…/releases/download/$tag/ModelMeter-setup.exe\` 始终指向最新构建。"
+            echo "> 版本号取构建时间（UTC+8），可直接覆盖安装此前任何构建。"
+          } >> "$notes"
+
+          {
+            echo "ROLLING_TAG=$tag"
+            echo "ROLLING_TITLE=ModelMeter 预发布 · $name · $stamp"
+            echo "ROLLING_VERSION=$name"
+          } >> "$GITHUB_ENV"
+
+          echo "=== 标题 ==="
+          echo "ModelMeter 预发布 · $name · $stamp"
+          echo "=== 说明 ==="
+          cat "$notes"
+
+      - name: Publish (overwrite the rolling release)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          files=(dist/ModelMeter-setup.exe dist/ModelMeter-setup.exe.md5)
+          for file in "${files[@]}"; do
+            if [ ! -f "$file" ]; then
+              echo "::error::missing release asset $file"
+              exit 1
+            fi
+          done
+          if gh release view "$ROLLING_TAG" >/dev/null 2>&1; then
+            # 固定资产名 + --clobber：原下载被就地替换，链接永不失效
+            gh release upload "$ROLLING_TAG" "${files[@]}" --clobber
+            # tag 也要强移：Release 页（含 Source code 链接）由 tag 渲染，
+            # 不移动就会挂着旧提交而资产已是新的
+            git push --force origin "HEAD:refs/tags/$ROLLING_TAG"
+            gh release edit "$ROLLING_TAG" \
+              --title "$ROLLING_TITLE" \
+              --notes-file pre-notes.md
+          else
+            gh release create "$ROLLING_TAG" \
+              --target "$GITHUB_SHA" \
+              --title "$ROLLING_TITLE" \
+              --notes-file pre-notes.md \
+              --prerelease \
+              "${files[@]}"
+          fi
+          echo "published $ROLLING_VERSION -> $ROLLING_TAG"
+
+  # ---------------------------------------------------------------------------
+  # v* tag -> 正式 Release，说明取自 CHANGELOG.md 的 `## [X.Y.Z]` 段。
+  # 独立成 job：发布需要写权限，而构建 job 可能跑在不受信的 PR 代码上。
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ModelMeter-windows-nsis
+          path: dist
+
+      - name: Prepare release notes from CHANGELOG
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v header="## [$ver]" '
+            $0 == header {flag=1; next}
+            /^## \[/ {if (flag) exit}
+            flag {print}
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md 缺少 ## [$ver] 段——正式发布前先补该段并与 tauri.conf.json 的 version 保持一致"
+            exit 1
+          fi
+          cat release-notes.md
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --target "$GITHUB_SHA" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            dist/ModelMeter-setup.exe dist/ModelMeter-setup.exe.md5
+          echo "published $GITHUB_REF_NAME"
