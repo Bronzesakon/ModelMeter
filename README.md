@@ -7,7 +7,7 @@ Windows 桌面端 **DeepSeek / MiMo** API 用量监控工具，用于查看账�
 ## 功能特性
 
 ### 双平台支持
-- **DeepSeek**：网页登录同步，查询账户余额（总余额 / 充值余额 / 赠送余额）、平台用量 Token、V4.1 Flash（deepseek-flash）/ V4 Flash（deepseek-v4-flash 旧名称）模型统计
+- **DeepSeek**：网页登录同步，查询账户余额（总余额 / 充值余额 / 赠送余额）、平台用量 Token、V4.1 Flash（deepseek-flash）/ V4 Pro（deepseek-v4-pro）模型统计；V4 Flash 等旧名请求已路由至 V4.1 Flash 计入同一模型
 - **MiMo**：小米账号登录，余额查询、用量数据展示，支持 **Token（按量计费）/ 套餐（订阅）** 两种付费模式切换
 - 主面板顶部 Provider 一键切换 / 记忆上次使用平台
 

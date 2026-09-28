@@ -11,9 +11,9 @@ export const useSettingsStore = defineStore("settings", () => {
   const autoStart = ref(false);
   const autoStartPending = ref(false); // 正在操作中，禁止重复点击
 
-  // 模型单选按钮持久化（v4flash = V4 Flash 旧名称桶，flash = V4.1 Flash 新模型）
-  const selectedDetailModel = ref<"v4flash" | "flash">("flash");
-  const selectedTrendModel = ref<"v4flash" | "flash">("flash");
+  // 模型单选按钮持久化（flash = V4.1 Flash，pro = V4 Pro，均在役；见 ds/api.rs 白名单）
+  const selectedDetailModel = ref<"pro" | "flash">("flash");
+  const selectedTrendModel = ref<"pro" | "flash">("flash");
 
   async function openPlatformLogin() {
     await invoke("ds_open_login_window");
@@ -53,33 +53,33 @@ export const useSettingsStore = defineStore("settings", () => {
     await invoke("broadcast_edge_snap_setting", { enabled });
   }
 
-  function normalizeModelSelection(val: string | null): "v4flash" | "flash" {
-    if (val === "flash" || val === "v4flash") return val;
-    // 旧版持久化的 "pro"（原 V4 Pro 桶）迁移到 v4flash（旧名称桶），其余按默认
-    if (val === "pro") return "v4flash";
+  function normalizeModelSelection(val: string | null): "pro" | "flash" {
+    if (val === "flash" || val === "pro") return val;
+    // 短命 v4flash 桶（V4 Flash 旧名已路由至 V4.1 Flash）并入 flash；其余按默认
+    if (val === "v4flash") return "flash";
     return "flash";
   }
 
-  async function loadSelectedDetailModel(): Promise<"v4flash" | "flash"> {
+  async function loadSelectedDetailModel(): Promise<"pro" | "flash"> {
     const val = await invoke<string | null>("load_setting", { key: "selected_detail_model" });
     selectedDetailModel.value = normalizeModelSelection(val);
     return selectedDetailModel.value;
   }
 
-  async function setSelectedDetailModel(value: "v4flash" | "flash") {
+  async function setSelectedDetailModel(value: "pro" | "flash") {
     if (selectedDetailModel.value === value) return;
     selectedDetailModel.value = value;
     await invoke("save_setting", { key: "selected_detail_model", value });
     await emit("detail-model-changed", value);
   }
 
-  async function loadSelectedTrendModel(): Promise<"v4flash" | "flash"> {
+  async function loadSelectedTrendModel(): Promise<"pro" | "flash"> {
     const val = await invoke<string | null>("load_setting", { key: "selected_trend_model" });
     selectedTrendModel.value = normalizeModelSelection(val);
     return selectedTrendModel.value;
   }
 
-  async function setSelectedTrendModel(value: "v4flash" | "flash") {
+  async function setSelectedTrendModel(value: "pro" | "flash") {
     if (selectedTrendModel.value === value) return;
     selectedTrendModel.value = value;
     await invoke("save_setting", { key: "selected_trend_model", value });

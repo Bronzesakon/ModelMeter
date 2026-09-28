@@ -71,25 +71,25 @@ describe("settings store", () => {
     invokeMock.mockResolvedValue("flash");
     await expect(store.loadSelectedDetailModel()).resolves.toBe("flash");
 
-    invokeMock.mockResolvedValue("v4flash");
-    await expect(store.loadSelectedDetailModel()).resolves.toBe("v4flash");
+    invokeMock.mockResolvedValue("pro");
+    await expect(store.loadSelectedDetailModel()).resolves.toBe("pro");
   });
 
-  it("legacy persisted pro selection migrates to v4flash", async () => {
+  it("legacy v4flash selection (routed legacy bucket) migrates to flash", async () => {
     const store = useSettingsStore();
-    invokeMock.mockResolvedValue("pro");
-    await expect(store.loadSelectedDetailModel()).resolves.toBe("v4flash");
-    await expect(store.loadSelectedTrendModel()).resolves.toBe("v4flash");
+    invokeMock.mockResolvedValue("v4flash");
+    await expect(store.loadSelectedDetailModel()).resolves.toBe("flash");
+    await expect(store.loadSelectedTrendModel()).resolves.toBe("flash");
   });
 
   it("setSelectedDetailModel emits only when the value changes", async () => {
     const store = useSettingsStore();
-    await store.setSelectedDetailModel("v4flash");
-    expect(store.selectedDetailModel).toBe("v4flash");
-    expect(emitMock).toHaveBeenCalledWith("detail-model-changed", "v4flash");
+    await store.setSelectedDetailModel("pro");
+    expect(store.selectedDetailModel).toBe("pro");
+    expect(emitMock).toHaveBeenCalledWith("detail-model-changed", "pro");
 
     emitMock.mockClear();
-    await store.setSelectedDetailModel("v4flash");
+    await store.setSelectedDetailModel("pro");
     expect(emitMock).not.toHaveBeenCalled();
   });
 

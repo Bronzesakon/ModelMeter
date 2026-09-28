@@ -8,34 +8,37 @@ pub struct BalanceInfo {
     pub topped_up_balance: String,
 }
 
-/// 官方 Usage 导出当前只含两类 flash 名称（上游 JayHome137/DeepSeekMonitor v1.6 口径）：
-/// V4.1 Flash 是新模型，V4 Flash 是旧名称，二者不代表"新/旧两代在役模型"之外的关系。
+/// 在役模型名单（2026-09-28 官网定价页核实：api-docs.deepseek.com/zh-cn/quick_start/pricing）：
+/// - V4.1 Flash（deepseek-flash）：当前 flash 在役模型。旧名 deepseek-v4-flash、
+///   deepseek-v4-flash-vision-exp 仍可调用但对应模型已下线，请求由
+///   DeepSeek-V4.1-Flash 提供服务并按 Flash 价格计费，故并入本桶。
+/// - V4 Pro（deepseek-v4-pro）：仍在役；deepseek-reasoner 为其历史别名。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum DeepSeekModel {
     Flash,
-    V4Flash,
+    Pro,
 }
 
 impl DeepSeekModel {
     pub fn api_model_name(&self) -> &str {
         match self {
             DeepSeekModel::Flash => "deepseek-flash",
-            DeepSeekModel::V4Flash => "deepseek-v4-flash",
+            DeepSeekModel::Pro => "deepseek-v4-pro",
         }
     }
 
     pub fn display_name(&self) -> &str {
         match self {
             DeepSeekModel::Flash => "V4.1 Flash",
-            DeepSeekModel::V4Flash => "V4 Flash",
+            DeepSeekModel::Pro => "V4 Pro",
         }
     }
 
     pub fn short_name(&self) -> &str {
         match self {
             DeepSeekModel::Flash => "V4.1",
-            DeepSeekModel::V4Flash => "V4",
+            DeepSeekModel::Pro => "Pro",
         }
     }
 }
@@ -152,16 +155,16 @@ pub struct DashboardData {
 
     // Usage
     pub flash_usage: Option<ModelUsageSummary>,
-    pub v4flash_usage: Option<ModelUsageSummary>,
+    pub pro_usage: Option<ModelUsageSummary>,
     pub flash_daily_usage: Vec<ModelDailyUsagePoint>,
-    pub v4flash_daily_usage: Vec<ModelDailyUsagePoint>,
+    pub pro_daily_usage: Vec<ModelDailyUsagePoint>,
 
     // Platform data
     pub current_day_cost: f64,
     pub current_month_cost: f64,
     pub current_day_requests: i32,
     pub current_day_flash_tokens: i64,
-    pub current_day_v4flash_tokens: i64,
+    pub current_day_pro_tokens: i64,
 
     // State
     pub has_platform_session: bool,
@@ -178,19 +181,19 @@ mod tests {
     #[test]
     fn model_metadata_matches_platform_api_names() {
         assert_eq!(DeepSeekModel::Flash.api_model_name(), "deepseek-flash");
-        assert_eq!(DeepSeekModel::V4Flash.api_model_name(), "deepseek-v4-flash");
+        assert_eq!(DeepSeekModel::Pro.api_model_name(), "deepseek-v4-pro");
         assert_eq!(DeepSeekModel::Flash.display_name(), "V4.1 Flash");
-        assert_eq!(DeepSeekModel::V4Flash.display_name(), "V4 Flash");
+        assert_eq!(DeepSeekModel::Pro.display_name(), "V4 Pro");
         assert_eq!(DeepSeekModel::Flash.short_name(), "V4.1");
-        assert_eq!(DeepSeekModel::V4Flash.short_name(), "V4");
+        assert_eq!(DeepSeekModel::Pro.short_name(), "Pro");
     }
 
     #[test]
     fn model_deserializes_from_lowercase() {
         let flash: DeepSeekModel = serde_json::from_str("\"flash\"").unwrap();
         assert_eq!(flash, DeepSeekModel::Flash);
-        let v4flash: DeepSeekModel = serde_json::from_str("\"v4flash\"").unwrap();
-        assert_eq!(v4flash, DeepSeekModel::V4Flash);
+        let pro: DeepSeekModel = serde_json::from_str("\"pro\"").unwrap();
+        assert_eq!(pro, DeepSeekModel::Pro);
     }
 
     #[test]

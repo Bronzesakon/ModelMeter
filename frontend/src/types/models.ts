@@ -6,7 +6,7 @@ export interface BalanceInfo {
 }
 
 export interface ModelUsageSummary {
-  model: "flash" | "v4flash";
+  model: "flash" | "pro";
   total_tokens: number;
   cost_in_cents: number;
   total_tokens_formatted: string;
@@ -32,15 +32,15 @@ export interface DashboardData {
   balance_info: BalanceInfo | null;
 
   flash_usage: ModelUsageSummary | null;
-  v4flash_usage: ModelUsageSummary | null;
+  pro_usage: ModelUsageSummary | null;
   flash_daily_usage: ModelDailyUsagePoint[];
-  v4flash_daily_usage: ModelDailyUsagePoint[];
+  pro_daily_usage: ModelDailyUsagePoint[];
 
   current_day_cost: number;
   current_month_cost: number;
   current_day_requests: number;
   current_day_flash_tokens: number;
-  current_day_v4flash_tokens: number;
+  current_day_pro_tokens: number;
 
   has_platform_session: boolean;
   is_first_launch: boolean;

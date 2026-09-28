@@ -100,14 +100,14 @@ async fn ds_refresh_once(storage: &Storage, api_state: &ApiState) -> Result<(Das
         topped_up_balance: 0.0,
         balance_info: None,
         flash_usage: None,
-        v4flash_usage: None,
+        pro_usage: None,
         flash_daily_usage: vec![],
-        v4flash_daily_usage: vec![],
+        pro_daily_usage: vec![],
         current_day_cost: 0.0,
         current_month_cost: 0.0,
         current_day_requests: 0,
         current_day_flash_tokens: 0,
-        current_day_v4flash_tokens: 0,
+        current_day_pro_tokens: 0,
         has_platform_session: platform_token.is_some(),
         is_first_launch: storage.is_first_launch(),
         last_updated: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -217,9 +217,9 @@ async fn ds_refresh_once(storage: &Storage, api_state: &ApiState) -> Result<(Das
 
     // Extract today's per-model tokens from daily usage (works with both platform & legacy data)
     let today_str = effective_today(&Local::now());
-    if data.current_day_v4flash_tokens == 0 {
-        if let Some(p) = data.v4flash_daily_usage.iter().find(|p| p.date == today_str) {
-            data.current_day_v4flash_tokens = p.total_tokens as i64;
+    if data.current_day_pro_tokens == 0 {
+        if let Some(p) = data.pro_daily_usage.iter().find(|p| p.date == today_str) {
+            data.current_day_pro_tokens = p.total_tokens as i64;
         }
     }
     if data.current_day_flash_tokens == 0 {
@@ -243,7 +243,7 @@ fn apply_platform_amount(
         if let Some(ref biz_data) = inner.biz_data {
             // Monthly model summaries (from biz_data.total)，未知模型不进卡片
             let mut month_flash_tokens: i64 = 0;
-            let mut month_v4flash_tokens: i64 = 0;
+            let mut month_pro_tokens: i64 = 0;
             for total_entry in &biz_data.total {
                 let model_total: i64 = total_entry.usage.iter()
                     .filter(|u| u.usage_type != "REQUEST")
@@ -251,7 +251,7 @@ fn apply_platform_amount(
                     .sum();
                 match api::classify_model(&total_entry.model) {
                     Some(DeepSeekModel::Flash) => month_flash_tokens += model_total,
-                    Some(DeepSeekModel::V4Flash) => month_v4flash_tokens += model_total,
+                    Some(DeepSeekModel::Pro) => month_pro_tokens += model_total,
                     None => {}
                 }
             }
@@ -266,12 +266,12 @@ fn apply_platform_amount(
                     cost_formatted: "¥0.00".into(),
                 });
             }
-            if month_v4flash_tokens > 0 {
-                data.v4flash_usage = Some(ModelUsageSummary {
-                    model: DeepSeekModel::V4Flash,
-                    total_tokens: month_v4flash_tokens as i32,
+            if month_pro_tokens > 0 {
+                data.pro_usage = Some(ModelUsageSummary {
+                    model: DeepSeekModel::Pro,
+                    total_tokens: month_pro_tokens as i32,
                     cost_in_cents: 0,
-                    total_tokens_formatted: api::format_number(month_v4flash_tokens as i32),
+                    total_tokens_formatted: api::format_number(month_pro_tokens as i32),
                     cost_formatted: "¥0.00".into(),
                 });
             }
@@ -286,7 +286,7 @@ fn apply_platform_amount(
                             .sum();
                         match api::classify_model(&model_data.model) {
                             Some(DeepSeekModel::Flash) => data.current_day_flash_tokens = model_tokens,
-                            Some(DeepSeekModel::V4Flash) => data.current_day_v4flash_tokens = model_tokens,
+                            Some(DeepSeekModel::Pro) => data.current_day_pro_tokens = model_tokens,
                             None => {}
                         }
                     }
@@ -300,7 +300,7 @@ fn apply_platform_amount(
             }
             // Populate daily usage arrays
             data.flash_daily_usage = api::build_daily_from_platform(&biz_data.days, DeepSeekModel::Flash);
-            data.v4flash_daily_usage = api::build_daily_from_platform(&biz_data.days, DeepSeekModel::V4Flash);
+            data.pro_daily_usage = api::build_daily_from_platform(&biz_data.days, DeepSeekModel::Pro);
         }
     }
 
@@ -317,7 +317,7 @@ fn apply_platform_cost(
     let current_month = now.month();
 
     let mut flash_cost_map: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
-    let mut v4flash_cost_map: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+    let mut pro_cost_map: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
 
     if let Some(ref inner) = cost.data {
         if let Some(ref biz_data_list) = inner.biz_data {
@@ -338,9 +338,9 @@ fn apply_platform_cost(
                         let cost_cents = (sum_model_cost(flash_model) * 100.0).round() as i32;
                         flash_cost_map.insert(day.date.clone(), cost_cents);
                     }
-                    if let Some(v4flash_model) = api::find_model(&day.data, DeepSeekModel::V4Flash) {
-                        let cost_cents = (sum_model_cost(v4flash_model) * 100.0).round() as i32;
-                        v4flash_cost_map.insert(day.date.clone(), cost_cents);
+                    if let Some(pro_model) = api::find_model(&day.data, DeepSeekModel::Pro) {
+                        let cost_cents = (sum_model_cost(pro_model) * 100.0).round() as i32;
+                        pro_cost_map.insert(day.date.clone(), cost_cents);
                     }
                 }
             }
@@ -353,8 +353,8 @@ fn apply_platform_cost(
             point.cost_in_cents = cents;
         }
     }
-    for point in &mut data.v4flash_daily_usage {
-        if let Some(&cents) = v4flash_cost_map.get(&point.date) {
+    for point in &mut data.pro_daily_usage {
+        if let Some(&cents) = pro_cost_map.get(&point.date) {
             point.cost_in_cents = cents;
         }
     }

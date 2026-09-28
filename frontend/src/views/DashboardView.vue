@@ -68,8 +68,8 @@
           <div class="text-xl font-bold text-gray-800 dark:text-gray-100">{{ dsStore.currentDayFlashTokens.toLocaleString() }}</div>
         </div>
         <div class="glass-card p-5">
-          <div class="flex items-center gap-2 mb-1"><span class="w-2 h-2 rounded-full inline-block" style="background: #0EA5E9"></span><span class="text-xs font-semibold tracking-wider text-gray-500 dark:text-gray-400">V4 Flash 今日消耗</span></div>
-          <div class="text-xl font-bold text-gray-800 dark:text-gray-100">{{ dsStore.currentDayV4flashTokens.toLocaleString() }}</div>
+          <div class="flex items-center gap-2 mb-1"><span class="w-2 h-2 rounded-full inline-block" style="background: #0EA5E9"></span><span class="text-xs font-semibold tracking-wider text-gray-500 dark:text-gray-400">V4 Pro 今日消耗</span></div>
+          <div class="text-xl font-bold text-gray-800 dark:text-gray-100">{{ dsStore.currentDayProTokens.toLocaleString() }}</div>
         </div>
       </div>
       <TokenDetail />
@@ -168,12 +168,12 @@ const currentStore = computed(() => activeProvider.value === "deepseek" ? dsStor
 
 const collapsedTitleTokens = computed(() => {
   if (activeProvider.value === "deepseek") {
-    return (dsStore.selectedDetailModel === "v4flash" ? dsStore.currentDayV4flashTokens : dsStore.currentDayFlashTokens).toLocaleString();
+    return (dsStore.selectedDetailModel === "pro" ? dsStore.currentDayProTokens : dsStore.currentDayFlashTokens).toLocaleString();
   }
   return (mimoSettings.selectedDetailModel === "v25pro" ? mimoStore.currentDayProTokens : mimoStore.currentDayFlashTokens).toLocaleString();
 });
 const collapsedTitleModelLabel = computed(() => {
-  if (activeProvider.value === "deepseek") return dsStore.selectedDetailModel === "v4flash" ? "V4 Flash" : "V4.1 Flash";
+  if (activeProvider.value === "deepseek") return dsStore.selectedDetailModel === "pro" ? "V4 Pro" : "V4.1 Flash";
   return mimoSettings.selectedDetailModel === "v25pro" ? "V2.5 Pro" : "V2.5";
 });
 
@@ -246,7 +246,7 @@ onMounted(async () => {
 
   // DS events
   listen("detail-model-changed", (event: { payload: any }) => {
-    if (event.payload === "v4flash" || event.payload === "flash") dsStore.selectedDetailModel = event.payload;
+    if (event.payload === "pro" || event.payload === "flash") dsStore.selectedDetailModel = event.payload;
     else if (event.payload === "v25pro" || event.payload === "v25") mimoStore.selectedDetailModel = event.payload;
   });
   listen("ds-login-complete", () => { invoke("ds_broadcast_refresh"); });

@@ -199,19 +199,20 @@ pub async fn fetch_user_summary(
     Ok(resp)
 }
 
-// MARK: - Model name normalization (上游 JayHome137/DeepSeekMonitor v1.6 口径)
+// MARK: - Model name normalization（2026-09-28 官网定价页核实）
 //
-// 官方 Usage 导出当前只含两类 flash 名称：deepseek-flash（V4.1 Flash，新模型）
-// 与 deepseek-v4-flash（V4 Flash，旧名称）。采用白名单精确匹配：只接受当前
-// 名称与明确列出的历史别名，未知名称（deepseek-reasoner、未来的
-// deepseek-v5-flash 等）一律返回 None，避免误计入现有模型卡片。
+// 在役模型只有两个：deepseek-flash（V4.1 Flash）与 deepseek-v4-pro（V4 Pro）。
+// 旧名 deepseek-v4-flash / deepseek-v4-flash-vision-exp 的请求由 V4.1-Flash
+// 提供服务并按 Flash 价格计费，与 deepseek-flash 同属一桶；deepseek-reasoner
+// 为 V4 Pro 的历史别名。白名单精确匹配，未知名称（如未来的 deepseek-v5-flash）
+// 一律返回 None，避免误计入现有模型卡片。
 
 pub(crate) fn classify_model(model: &str) -> Option<DeepSeekModel> {
     match model.trim().to_lowercase().as_str() {
-        "deepseek-flash" => Some(DeepSeekModel::Flash),
-        "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" | "deepseek-chat" => {
-            Some(DeepSeekModel::V4Flash)
+        "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" | "deepseek-chat" => {
+            Some(DeepSeekModel::Flash)
         }
+        "deepseek-v4-pro" | "deepseek-reasoner" => Some(DeepSeekModel::Pro),
         _ => None,
     }
 }
@@ -314,14 +315,16 @@ mod tests {
     fn classify_model_uses_current_and_historical_names_only() {
         // 当前名称
         assert_eq!(classify_model("deepseek-flash"), Some(DeepSeekModel::Flash));
-        assert_eq!(classify_model("deepseek-v4-flash"), Some(DeepSeekModel::V4Flash));
+        assert_eq!(classify_model("deepseek-v4-pro"), Some(DeepSeekModel::Pro));
         // 大小写与空白容错
         assert_eq!(classify_model(" DEEPSEEK-FLASH "), Some(DeepSeekModel::Flash));
-        // 历史别名归入 V4 Flash（旧名称）桶
-        assert_eq!(classify_model("deepseek-v4-flash-vision-exp"), Some(DeepSeekModel::V4Flash));
-        assert_eq!(classify_model("deepseek-chat"), Some(DeepSeekModel::V4Flash));
-        // 未知/历史推理模型不入卡片，避免污染聚合
-        assert_eq!(classify_model("deepseek-reasoner"), None);
+        // V4 Flash 旧名已路由至 V4.1 Flash，与 deepseek-chat 一并归入 Flash 桶
+        assert_eq!(classify_model("deepseek-v4-flash"), Some(DeepSeekModel::Flash));
+        assert_eq!(classify_model("deepseek-v4-flash-vision-exp"), Some(DeepSeekModel::Flash));
+        assert_eq!(classify_model("deepseek-chat"), Some(DeepSeekModel::Flash));
+        // deepseek-reasoner 是 V4 Pro 的历史别名
+        assert_eq!(classify_model("deepseek-reasoner"), Some(DeepSeekModel::Pro));
+        // 未知模型不入卡片，避免污染聚合
         assert_eq!(classify_model("deepseek-v5-flash"), None);
         assert_eq!(classify_model(""), None);
     }
@@ -330,7 +333,7 @@ mod tests {
     fn find_model_picks_only_requested_bucket() {
         let models = vec![
             PlatformModelData {
-                model: "deepseek-v4-flash".to_string(),
+                model: "deepseek-v4-pro".to_string(),
                 usage: vec![],
             },
             PlatformModelData {
@@ -338,7 +341,7 @@ mod tests {
                 usage: vec![],
             },
         ];
-        assert!(find_model(&models, DeepSeekModel::V4Flash).unwrap().model == "deepseek-v4-flash");
+        assert!(find_model(&models, DeepSeekModel::Pro).unwrap().model == "deepseek-v4-pro");
         assert!(find_model(&models, DeepSeekModel::Flash).unwrap().model == "deepseek-flash");
     }
 }

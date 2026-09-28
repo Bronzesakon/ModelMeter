@@ -15,15 +15,15 @@ export const useDashboardStore = defineStore("dashboard", () => {
   const balanceInfo = ref<BalanceInfo | null>(null);
 
   const flashUsage = ref<ModelUsageSummary | null>(null);
-  const v4flashUsage = ref<ModelUsageSummary | null>(null);
+  const proUsage = ref<ModelUsageSummary | null>(null);
   const flashDailyUsage = ref<ModelDailyUsagePoint[]>([]);
-  const v4flashDailyUsage = ref<ModelDailyUsagePoint[]>([]);
+  const proDailyUsage = ref<ModelDailyUsagePoint[]>([]);
 
   const currentDayCost = ref(0);
   const currentMonthCost = ref(0);
   const currentDayRequests = ref(0);
   const currentDayFlashTokens = ref(0);
-  const currentDayV4flashTokens = ref(0);
+  const currentDayProTokens = ref(0);
 
   const hasPlatformSession = ref(false);
   const isFirstLaunch = ref(false);
@@ -34,9 +34,9 @@ export const useDashboardStore = defineStore("dashboard", () => {
   const warningMessage = ref<string | null>(null);
 
   // Model selection (three independent states)
-  const selectedTrendModel = ref<"v4flash" | "flash">("flash");
-  const selectedDetailModel = ref<"v4flash" | "flash">("flash");
-  const selectedWidgetModel = ref<"v4flash" | "flash">("flash");
+  const selectedTrendModel = ref<"pro" | "flash">("flash");
+  const selectedDetailModel = ref<"pro" | "flash">("flash");
+  const selectedWidgetModel = ref<"pro" | "flash">("flash");
 
   const nowTime = ref(Date.now());
   setInterval(() => { nowTime.value = Date.now(); }, 60_000);
@@ -69,7 +69,7 @@ export const useDashboardStore = defineStore("dashboard", () => {
   // Computed: Trend chart data (always 7 days, zero-filled)
   const trendChartData = computed(() => {
     const source =
-      selectedTrendModel.value === "v4flash" ? v4flashDailyUsage.value : flashDailyUsage.value;
+      selectedTrendModel.value === "pro" ? proDailyUsage.value : flashDailyUsage.value;
     const sourceMap = new Map(source.map((p) => [p.date, p]));
     return lastSevenDatesList.value.map((date) => {
       const p = sourceMap.get(date);
@@ -89,7 +89,7 @@ export const useDashboardStore = defineStore("dashboard", () => {
   // Today point for trend
   const trendTodayPoint = computed(() => {
     const source =
-      selectedTrendModel.value === "v4flash" ? v4flashDailyUsage.value : flashDailyUsage.value;
+      selectedTrendModel.value === "pro" ? proDailyUsage.value : flashDailyUsage.value;
     return source.find((p) => p.date === todayStr.value) || null;
   });
 
@@ -104,7 +104,7 @@ export const useDashboardStore = defineStore("dashboard", () => {
   // Today point for detail
   const detailTodayPoint = computed(() => {
     const source =
-      selectedDetailModel.value === "v4flash" ? v4flashDailyUsage.value : flashDailyUsage.value;
+      selectedDetailModel.value === "pro" ? proDailyUsage.value : flashDailyUsage.value;
     return source.find((p) => p.date === todayStr.value) || null;
   });
 
@@ -119,7 +119,7 @@ export const useDashboardStore = defineStore("dashboard", () => {
   // Today point for widget
   const widgetTodayPoint = computed(() => {
     const source =
-      selectedWidgetModel.value === "v4flash" ? v4flashDailyUsage.value : flashDailyUsage.value;
+      selectedWidgetModel.value === "pro" ? proDailyUsage.value : flashDailyUsage.value;
     return source.find((p) => p.date === todayStr.value) || null;
   });
 
@@ -139,15 +139,15 @@ export const useDashboardStore = defineStore("dashboard", () => {
     balanceInfo.value = data.balance_info;
 
     flashUsage.value = data.flash_usage;
-    v4flashUsage.value = data.v4flash_usage;
+    proUsage.value = data.pro_usage;
     flashDailyUsage.value = data.flash_daily_usage;
-    v4flashDailyUsage.value = data.v4flash_daily_usage;
+    proDailyUsage.value = data.pro_daily_usage;
 
     currentDayCost.value = data.current_day_cost;
     currentMonthCost.value = data.current_month_cost;
     currentDayRequests.value = data.current_day_requests;
     currentDayFlashTokens.value = data.current_day_flash_tokens;
-    currentDayV4flashTokens.value = data.current_day_v4flash_tokens;
+    currentDayProTokens.value = data.current_day_pro_tokens;
 
     hasPlatformSession.value = data.has_platform_session;
     isFirstLaunch.value = data.is_first_launch;
@@ -179,8 +179,8 @@ export const useDashboardStore = defineStore("dashboard", () => {
 
   return {
     isAccountAvailable, totalBalance, grantedBalance, toppedUpBalance, balanceInfo,
-    flashUsage, v4flashUsage, flashDailyUsage, v4flashDailyUsage,
-    currentDayCost, currentMonthCost, currentDayRequests, currentDayFlashTokens, currentDayV4flashTokens,
+    flashUsage, proUsage, flashDailyUsage, proDailyUsage,
+    currentDayCost, currentMonthCost, currentDayRequests, currentDayFlashTokens, currentDayProTokens,
     hasPlatformSession, isFirstLaunch, isLoading, hasLoaded, lastUpdated, errorMessage, warningMessage,
     selectedTrendModel, selectedDetailModel, selectedWidgetModel,
     trendChartData,

@@ -44,6 +44,6 @@ const store = useDashboardStore();
 
 const models = [
   { value: "flash" as const, label: "V4.1 Flash" },
-  { value: "v4flash" as const, label: "V4 Flash" },
+  { value: "pro" as const, label: "V4 Pro" },
 ];
 </script>
