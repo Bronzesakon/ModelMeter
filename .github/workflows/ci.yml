@@ -219,6 +219,8 @@ jobs:
           mv "$setup" "$OUT/ModelMeter-setup.exe"
           (cd "$OUT" && md5sum ModelMeter-setup.exe > ModelMeter-setup.exe.md5 && ls -l)
 
+      # 只传同目录的安装包 + md5：upload-artifact 按最小公共祖先归档，
+      # 路径跨目录会使 prerelease job 下载后的目录结构不固定
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
@@ -226,7 +228,6 @@ jobs:
           if-no-files-found: error
           overwrite: true
           path: |
-            src/target/release/ModelMeter.exe
             src/target/release/bundle/nsis/ModelMeter-setup.exe
             src/target/release/bundle/nsis/ModelMeter-setup.exe.md5
 
