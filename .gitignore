@@ -1,12 +1,9 @@
 # 排除的文件夹
-DeepSeekMonitorWindows/
-RAW_DeepSeekDesktopAssistant/
-RAW_MimoDesktopAssistant/
+参考项目/
 sevnx/
 
 # Local handoff and project notes
 .handoff-round-corners.md
-PROJECT_STRUCTURE.md
 
 # 编译产物
 target/
@@ -14,6 +11,9 @@ src/target/
 *.exe
 *.dll
 *.pdb
+
+# 例外：Tauri 打包资源，tauri.conf.json 的 bundle.resources 依赖它，必须随仓库分发
+!src/WebView2Loader.dll
 
 # 缓存和配置
 .cargo/

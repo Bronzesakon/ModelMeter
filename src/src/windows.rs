@@ -11,8 +11,59 @@ static MONITOR_CHANGING: AtomicBool = AtomicBool::new(false);
 
 const INVALID_COORD_THRESHOLD: i32 = -10000;
 
+#[cfg(target_os = "windows")]
+pub fn register_rounded_region(win: &tauri::WebviewWindow) {
+    apply_rounded_region(win);
+
+    let window = win.clone();
+    win.clone().on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Resized(_)) {
+            apply_rounded_region(&window);
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn register_rounded_region(_win: &tauri::WebviewWindow) {}
+
+#[cfg(target_os = "windows")]
+fn apply_rounded_region(win: &tauri::WebviewWindow) {
+    use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
+
+    let (Ok(hwnd), Ok(size)) = (win.hwnd(), win.outer_size()) else {
+        return;
+    };
+
+    let width = size.width.min(i32::MAX as u32) as i32;
+    let height = size.height.min(i32::MAX as u32) as i32;
+    if width <= 0 || height <= 0 {
+        return;
+    }
+
+    // The native region clips the WebView compositor itself, including pixels
+    // outside the CSS surface that otherwise appear black on transparent windows.
+    unsafe {
+        let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 24, 24);
+        let _ = SetWindowRgn(hwnd, Some(region), true);
+    }
+}
+
 fn is_valid_coord(v: i32) -> bool {
     v > INVALID_COORD_THRESHOLD
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_valid_coord_rejects_sentinel_values() {
+        assert!(is_valid_coord(0));
+        assert!(is_valid_coord(-9999));
+        assert!(!is_valid_coord(INVALID_COORD_THRESHOLD));
+        assert!(!is_valid_coord(-10001));
+        assert!(!is_valid_coord(i32::MIN));
+    }
 }
 
 fn is_position_on_any_monitor(app: &AppHandle, pos: &PhysicalPosition<i32>) -> bool {
@@ -326,6 +377,15 @@ macro_rules! build_window {
     }};
 }
 
+/// 启动时初始化主面板并显示：注册主窗口的位置保存与可见性跟踪，然后显示面板。
+pub fn init_main_panel(app: &AppHandle, win: &tauri::WebviewWindow) {
+    if let Some(storage) = app.try_state::<Arc<crate::Storage>>() {
+        register_position_saver(win, storage.inner().clone(), "main");
+    }
+    register_visibility_tracking(win);
+    show_panel(app);
+}
+
 pub fn show_panel(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         ensure_edge_snap(app, "main", &MAIN_EDGE_SNAP_REGISTERED);
@@ -372,13 +432,23 @@ pub fn show_panel(app: &AppHandle) {
     }
 
     let saved_pos = load_saved_pos(app, "main").filter(|p| is_position_on_any_monitor(app, p));
-    let mut b = build_window!(app, "main", tauri::WebviewUrl::App("index.html".into()), "面板", 400.0, 780.0, true, true);
+    let mut b = WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+        .title("面板")
+        .inner_size(400.0, 780.0)
+        .min_inner_size(1.0, 1.0)
+        .decorations(false)
+        .transparent(true)
+        .resizable(false)
+        .devtools(false)
+        .shadow(false)
+        .always_on_top(true);
     b = b.visible(false);
     if saved_pos.is_none() {
         b = b.center();
     }
     match b.build() {
         Ok(win) => {
+            register_rounded_region(&win);
             if let Some(storage) = app.try_state::<Arc<crate::Storage>>() {
                 register_position_saver(&win, storage.inner().clone(), "main");
                 register_edge_snap(&win, storage.inner().clone(), "main");
@@ -774,4 +844,139 @@ pub fn snap_to_edge(window: &tauri::WebviewWindow) {
 
 pub fn set_dragging(_label: &str, _dragging: bool, _app: &AppHandle) {
     crate::debug_log!("[set_dragging] label={}, dragging={}", _label, _dragging);
+}
+
+// ─── WebView2 Cookie 提取（含 HttpOnly）────────────────────
+
+/// 从指定 WebView 窗口提取某域的全部 cookie（含 HttpOnly），返回 `name=value; ...` 串。
+#[cfg(target_os = "windows")]
+pub fn extract_webview_cookies(app: &AppHandle, win_label: &str, host: &str) -> Result<String, String> {
+    use std::sync::mpsc;
+    use webview2_com::GetCookiesCompletedHandler;
+    use webview2_com::Microsoft::Web::WebView2::Win32::*;
+    use windows_core::{Interface, PWSTR};
+
+    let win = app
+        .get_webview_window(win_label)
+        .ok_or_else(|| format!("{win_label} window not found"))?;
+
+    let (tx, rx) = mpsc::channel::<Result<String, String>>();
+    let tx_for_err = tx.clone();
+    let host_owned = host.to_string();
+    let result = win.with_webview(move |platform_webview| unsafe {
+        let controller = platform_webview.controller();
+
+        let webview = match controller.CoreWebView2() {
+            Ok(wv) => wv,
+            Err(e) => {
+                let _ = tx.send(Err(format!("get webview failed: {}", e)));
+                return;
+            }
+        };
+
+        let webview2: ICoreWebView2_2 = match webview.cast() {
+            Ok(wv2) => wv2,
+            Err(e) => {
+                let _ = tx.send(Err(format!("cast failed: {}", e)));
+                return;
+            }
+        };
+
+        let cookie_mgr = match webview2.CookieManager() {
+            Ok(mgr) => mgr,
+            Err(e) => {
+                let _ = tx.send(Err(format!("CookieManager failed: {}", e)));
+                return;
+            }
+        };
+
+        let uri = windows_core::HSTRING::from(&host_owned);
+
+        let handler = GetCookiesCompletedHandler::create(Box::new(
+            move |error_code: windows_core::Result<()>,
+                  cookie_list: Option<ICoreWebView2CookieList>|
+                  -> windows_core::Result<()> {
+                if let Err(e) = error_code {
+                    let _ = tx.send(Err(format!("GetCookies callback error: {}", e)));
+                    return Ok(());
+                }
+                let cookie_list = match cookie_list {
+                    Some(list) => list,
+                    None => {
+                        let _ = tx.send(Err("cookie_list is null".to_string()));
+                        return Ok(());
+                    }
+                };
+                let mut count: u32 = 0;
+                if let Err(e) = cookie_list.Count(&mut count) {
+                    let _ = tx.send(Err(format!("Count failed: {}", e)));
+                    return Ok(());
+                }
+                let mut parts = Vec::new();
+                for i in 0..count {
+                    let cookie = match cookie_list.GetValueAtIndex(i) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                    let mut name_pwstr = PWSTR::null();
+                    let mut value_pwstr = PWSTR::null();
+                    if cookie.Name(&mut name_pwstr).is_err() {
+                        continue;
+                    }
+                    if cookie.Value(&mut value_pwstr).is_err() {
+                        windows::Win32::System::Com::CoTaskMemFree(
+                            Some(name_pwstr.as_ptr() as *const _),
+                        );
+                        continue;
+                    }
+                    let name = name_pwstr.to_string().unwrap_or_default();
+                    let value = value_pwstr.to_string().unwrap_or_default();
+                    windows::Win32::System::Com::CoTaskMemFree(
+                        Some(name_pwstr.as_ptr() as *const _),
+                    );
+                    windows::Win32::System::Com::CoTaskMemFree(
+                        Some(value_pwstr.as_ptr() as *const _),
+                    );
+                    if !name.is_empty() {
+                        let needs_quoting = value.contains('=')
+                            || value.contains(',')
+                            || value.contains(';')
+                            || value.contains(' ')
+                            || value.contains('"');
+                        let formatted_value = if needs_quoting
+                            && !value.starts_with('"')
+                            && !value.ends_with('"')
+                        {
+                            format!("\"{}\"", value.replace('"', "\\\""))
+                        } else {
+                            value
+                        };
+                        parts.push(format!("{}={}", name, formatted_value));
+                    }
+                }
+                let _ = tx.send(Ok(parts.join("; ")));
+                Ok(())
+            },
+        ));
+
+        if let Err(e) = cookie_mgr.GetCookies(&uri, &handler) {
+            let _ = tx_for_err.send(Err(format!("GetCookies call failed: {}", e)));
+        }
+    });
+
+    if let Err(e) = result {
+        return Err(format!("with_webview failed: {}", e));
+    }
+
+    rx.recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| "cookie extraction timed out".to_string())?
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn extract_webview_cookies(
+    _app: &AppHandle,
+    _win_label: &str,
+    _host: &str,
+) -> Result<String, String> {
+    Err("cookie extraction only supported on Windows".to_string())
 }

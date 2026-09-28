@@ -1,5 +1,5 @@
 <template>
-  <div ref="rootEl" class="p-4 glass-root">
+  <div ref="rootEl" class="p-4 glass-root settings-surface">
     <div data-tauri-drag-region class="title-bar mb-2">
       <div class="flex items-center gap-1.5">
         <img src="/icon.png" class="w-3.5 h-3.5 dark:brightness-150" />

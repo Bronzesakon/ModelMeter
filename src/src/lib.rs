@@ -1,6 +1,8 @@
 #![allow(non_snake_case)]
 
+pub mod crypto;
 pub mod ds;
+pub mod error;
 pub mod mimo;
 pub mod storage;
 pub mod tray;
@@ -22,7 +24,7 @@ macro_rules! debug_log {
 
 use storage::Storage;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::collections::HashSet;
 use futures::FutureExt;
 use tokio::sync::watch;
@@ -38,6 +40,10 @@ pub struct RefreshNotifier {
 
 const APP_DATA_DIR_NAME: &str = "ModelMeter";
 const LEGACY_APP_DATA_DIR_NAME: &str = "DeepSeekDesktopAssistant";
+
+/// 定期静默续期登录态的间隔（秒）。每 30 分钟用现有 WebView 会话刷新一次登录态快照。
+const SILENT_REFRESH_INTERVAL_SECS: u64 = 1800;
+static LAST_SILENT_REFRESH: AtomicU64 = AtomicU64::new(0);
 
 pub fn run() {
     let storage = Arc::new(Storage::new());
@@ -84,6 +90,7 @@ pub fn run() {
             // DeepSeek commands (ds_ prefix)
             ds::commands::ds_refresh_data,
             ds::commands::ds_get_cached_data,
+            ds::commands::ds_has_platform_session,
             ds::commands::ds_mark_onboarding_completed,
             ds::commands::ds_open_login_window,
             ds::commands::ds_clear_platform_session,
@@ -96,6 +103,7 @@ pub fn run() {
             // MiMo commands (mimo_ prefix)
             mimo::commands::mimo_refresh_data,
             mimo::commands::mimo_get_cached_data,
+            mimo::commands::mimo_has_platform_session,
             mimo::commands::mimo_mark_onboarding_completed,
             mimo::commands::mimo_open_login_window,
             mimo::commands::mimo_clear_platform_session,
@@ -138,7 +146,7 @@ pub fn run() {
 
             // 预热主窗口
             {
-                let _ = tauri::WebviewWindowBuilder::new(
+                if let Ok(window) = tauri::WebviewWindowBuilder::new(
                     app,
                     "main",
                     tauri::WebviewUrl::App("index.html".into()),
@@ -153,7 +161,11 @@ pub fn run() {
                 .devtools(false)
                 .center()
                 .shadow(false)
-                .build();
+                .build() {
+                    crate::windows::register_rounded_region(&window);
+                    // 启动时显示主面板（同时注册位置保存与可见性跟踪）
+                    crate::windows::init_main_panel(app.handle(), &window);
+                }
             }
 
             // 预热趋势详情窗口
@@ -205,12 +217,26 @@ pub fn run() {
 
                     let storage = handle.state::<Arc<Storage>>();
 
+                    // 定期静默续期登录态（每 30 分钟一次），降低 401 概率
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    if now_secs.saturating_sub(LAST_SILENT_REFRESH.load(Ordering::Acquire))
+                        >= SILENT_REFRESH_INTERVAL_SECS
+                    {
+                        LAST_SILENT_REFRESH.store(now_secs, Ordering::Release);
+                        debug_log!("[refresh-timer] 定期静默续期登录态");
+                        let _ = ds::login::silent_refresh_session(&handle).await;
+                        let _ = mimo::login::silent_refresh_session(&handle).await;
+                    }
+
                     // DeepSeek 刷新
                     let ds_state = handle.state::<ds::api::ApiState>();
                     if !ds_state.is_refreshing.swap(true, Ordering::Acquire) {
                         let _ds_guard = ds::commands::RefreshGuard::new(&ds_state.is_refreshing);
                         debug_log!("[refresh-timer] 开始刷新 DeepSeek");
-                        let ds_result = std::panic::AssertUnwindSafe(ds::commands::do_refresh(&storage, &ds_state))
+                        let ds_result = std::panic::AssertUnwindSafe(ds::commands::do_refresh(&storage, &ds_state, Some(&handle)))
                             .catch_unwind()
                             .await;
                         match ds_result {

@@ -43,7 +43,7 @@ import { useDashboardStore } from "@/stores/dashboard";
 const store = useDashboardStore();
 
 const models = [
-  { value: "pro" as const, label: "V4 Pro" },
-  { value: "flash" as const, label: "V4 Flash" },
+  { value: "flash" as const, label: "V4.1 Flash" },
+  { value: "v4flash" as const, label: "V4 Flash" },
 ];
 </script>

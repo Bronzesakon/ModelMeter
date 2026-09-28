@@ -147,13 +147,13 @@ const currentStore = computed(() => activeProvider.value === "deepseek" ? dsStor
 
 const collapsedTitleTokens = computed(() => {
   if (activeProvider.value === "deepseek") {
-    return (dsStore.selectedDetailModel === "pro" ? dsStore.currentDayProTokens : dsStore.currentDayFlashTokens).toLocaleString();
+    return (dsStore.selectedDetailModel === "v4flash" ? dsStore.currentDayV4flashTokens : dsStore.currentDayFlashTokens).toLocaleString();
   } else {
     return (mimoSettings.selectedDetailModel === "v25pro" ? mimoStore.currentDayProTokens : mimoStore.currentDayFlashTokens).toLocaleString();
   }
 });
 const collapsedTitleModelLabel = computed(() => {
-  if (activeProvider.value === "deepseek") return dsStore.selectedDetailModel === "pro" ? "V4 Pro" : "V4 Flash";
+  if (activeProvider.value === "deepseek") return dsStore.selectedDetailModel === "v4flash" ? "V4 Flash" : "V4.1 Flash";
   return mimoSettings.selectedDetailModel === "v25pro" ? "V2.5 Pro" : "V2.5";
 });
 
@@ -223,7 +223,7 @@ onMounted(async () => {
 
   // DS events (RAW used "login-complete" and "trigger-refresh")
   listen("detail-model-changed", (event: { payload: any }) => {
-    if (event.payload === "pro" || event.payload === "flash") dsStore.selectedDetailModel = event.payload;
+    if (event.payload === "v4flash" || event.payload === "flash") dsStore.selectedDetailModel = event.payload;
     else if (event.payload === "v25pro" || event.payload === "v25") mimoStore.selectedDetailModel = event.payload;
   });
   listen("ds-login-complete", () => { invoke("ds_broadcast_refresh"); });

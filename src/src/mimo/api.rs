@@ -1,5 +1,4 @@
 use crate::mimo::models::*;
-use std::fmt;
 use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -50,28 +49,8 @@ fn attach_cookie(mut req: reqwest::RequestBuilder, cookies: Option<&str>) -> req
     req
 }
 
-#[derive(Debug)]
-pub enum ApiError {
-    PlatformUnauthorized,
-    RateLimited,
-    Http(String),
-}
-
-impl fmt::Display for ApiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ApiError::PlatformUnauthorized => write!(f, "登录已过期，请重新登录"),
-            ApiError::RateLimited => write!(f, "请求过于频繁"),
-            ApiError::Http(msg) => write!(f, "请求失败: {}", msg),
-        }
-    }
-}
-
-impl ApiError {
-    pub fn is_auth_error(&self) -> bool {
-        matches!(self, ApiError::PlatformUnauthorized)
-    }
-}
+/// 复用统一错误类型（变体与历史代码兼容）。
+pub use crate::error::AppError as ApiError;
 
 pub struct ApiState {
     pub platform_cookies: Mutex<Option<String>>,
@@ -432,4 +411,90 @@ pub fn format_number(n: i64) -> String {
         result.push(c);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_truncate_respects_utf8_boundaries() {
+        let s = "中文abc"; // 3 + 3 + 3 = 9 bytes
+        assert_eq!(safe_truncate(s, 9), "中文abc");
+        assert_eq!(safe_truncate(s, 6), "中文");
+        // 4/5 落在“文”的字节中间，应退回上一个字符边界
+        assert_eq!(safe_truncate(s, 4), "中");
+        assert_eq!(safe_truncate(s, 5), "中");
+        assert_eq!(safe_truncate(s, 3), "中");
+        assert_eq!(safe_truncate(s, 0), "");
+        assert_eq!(safe_truncate("", 10), "");
+    }
+
+    #[test]
+    fn safe_truncate_ascii() {
+        assert_eq!(safe_truncate("hello", 3), "hel");
+        assert_eq!(safe_truncate("hello", 5), "hello");
+        assert_eq!(safe_truncate("hello", 99), "hello");
+    }
+
+    #[test]
+    fn model_classification() {
+        assert!(is_pro_model("mimo-v2.5-pro"));
+        assert!(is_pro_model("PRO"));
+        assert!(!is_pro_model("mimo-v2.5"));
+
+        assert!(is_standard_model("mimo-v2.5"));
+        assert!(is_standard_model("standard-x"));
+        assert!(is_standard_model("v2-flash"));
+        assert!(!is_standard_model("mimo-v2.5-pro"));
+        assert!(!is_standard_model("gpt-4o"));
+    }
+
+    #[test]
+    fn extract_ph_from_cookies_finds_param() {
+        assert_eq!(
+            extract_ph_from_cookies(Some("a=1; api-platform_ph=abc123; b=2")).as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(
+            extract_ph_from_cookies(Some("api-platform_ph=\"quoted\"")).as_deref(),
+            Some("quoted")
+        );
+        assert_eq!(extract_ph_from_cookies(Some("a=1; b=2")), None);
+        assert_eq!(extract_ph_from_cookies(None), None);
+    }
+
+    #[test]
+    fn append_ph_builds_query() {
+        let cookies = Some("api-platform_ph=p h+x");
+        assert_eq!(
+            append_ph("https://platform.xiaomimimo.com/api/v1/balance", cookies),
+            "https://platform.xiaomimimo.com/api/v1/balance?api-platform_ph=p%20h%2Bx"
+        );
+        assert_eq!(
+            append_ph("https://host/path?a=1", cookies),
+            "https://host/path?a=1&api-platform_ph=p%20h%2Bx"
+        );
+        assert_eq!(append_ph("https://host/path", None), "https://host/path");
+    }
+
+    #[test]
+    fn format_number_groups_thousands() {
+        assert_eq!(format_number(0), "0");
+        assert_eq!(format_number(999), "999");
+        assert_eq!(format_number(1000), "1,000");
+        assert_eq!(format_number(1234567), "1,234,567");
+        assert_eq!(format_number(-1234), "-1,234");
+        assert_eq!(format_number(-1), "-1");
+    }
+
+    #[test]
+    fn api_state_session_and_cache() {
+        let state = ApiState::new();
+        assert!(!state.has_platform_session());
+        assert!(state.cached_data().is_none());
+
+        *state.platform_cookies.lock().unwrap() = Some("c=1".to_string());
+        assert!(state.has_platform_session());
+    }
 }

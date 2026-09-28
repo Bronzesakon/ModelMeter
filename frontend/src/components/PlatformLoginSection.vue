@@ -34,13 +34,14 @@
 <script setup lang="ts">
 import { onMounted } from "vue";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { useDashboardStore } from "@/stores/dashboard";
 import { useSettingsStore } from "@/stores/settings";
 
 const dashboard = useDashboardStore();
 const settings = useSettingsStore();
 
-onMounted(() => {
+onMounted(async () => {
   listen("ds-login-complete", () => {
     dashboard.hasPlatformSession = true;
   });
@@ -54,6 +55,7 @@ onMounted(() => {
       dashboard.refresh();
     }
   });
+  dashboard.hasPlatformSession = await invoke<boolean>("ds_has_platform_session").catch(() => false);
 });
 
 async function startLogin() {

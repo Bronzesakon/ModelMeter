@@ -34,13 +34,14 @@
 <script setup lang="ts">
 import { onMounted } from "vue";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { useMimoDashboardStore } from "@/stores/mimo-dashboard";
 import { useSettingsStore } from "@/stores/mimo-settings";
 
 const mimoDashboard = useMimoDashboardStore();
 const settings = useSettingsStore();
 
-onMounted(() => {
+onMounted(async () => {
   listen("mimo-login-complete", () => {
     mimoDashboard.hasPlatformSession = true;
   });
@@ -54,6 +55,7 @@ onMounted(() => {
       mimoDashboard.refresh();
     }
   });
+  mimoDashboard.hasPlatformSession = await invoke<boolean>("mimo_has_platform_session").catch(() => false);
 });
 
 async function startLogin() {

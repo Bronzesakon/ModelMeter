@@ -1,5 +1,5 @@
 <template>
-  <div ref="rootEl" :class="[collapsed ? 'px-5 pt-2 glass-root' : 'p-4 glass-root']" @mouseenter="onTitleEnter" @mouseleave="onRootLeave">
+  <div ref="rootEl" :class="[collapsed ? 'px-5 pt-2 glass-root' : 'p-4 glass-root', 'main-surface']" @mouseenter="onTitleEnter" @mouseleave="onRootLeave">
     <div data-tauri-drag-region :class="collapsed ? 'relative flex items-center justify-center mb-2' : 'title-bar mb-2'" @mouseenter="onTitleEnter" @mousedown="onTitleDown">
       <ProviderToggle v-if="!collapsed" />
       <span v-if="collapsed" class="inline-flex items-center text-sm font-semibold leading-none">
@@ -64,12 +64,12 @@
       </div>
       <div class="grid grid-cols-2 gap-3">
         <div class="glass-card p-5">
-          <div class="flex items-center gap-2 mb-1"><span class="w-2 h-2 rounded-full inline-block" style="background: #8B5CF6"></span><span class="text-xs font-semibold tracking-wider text-gray-500 dark:text-gray-400">V4 Pro 今日消耗</span></div>
-          <div class="text-xl font-bold text-gray-800 dark:text-gray-100">{{ dsStore.currentDayProTokens.toLocaleString() }}</div>
+          <div class="flex items-center gap-2 mb-1"><span class="w-2 h-2 rounded-full inline-block" style="background: #8B5CF6"></span><span class="text-xs font-semibold tracking-wider text-gray-500 dark:text-gray-400">V4.1 Flash 今日消耗</span></div>
+          <div class="text-xl font-bold text-gray-800 dark:text-gray-100">{{ dsStore.currentDayFlashTokens.toLocaleString() }}</div>
         </div>
         <div class="glass-card p-5">
           <div class="flex items-center gap-2 mb-1"><span class="w-2 h-2 rounded-full inline-block" style="background: #0EA5E9"></span><span class="text-xs font-semibold tracking-wider text-gray-500 dark:text-gray-400">V4 Flash 今日消耗</span></div>
-          <div class="text-xl font-bold text-gray-800 dark:text-gray-100">{{ dsStore.currentDayFlashTokens.toLocaleString() }}</div>
+          <div class="text-xl font-bold text-gray-800 dark:text-gray-100">{{ dsStore.currentDayV4flashTokens.toLocaleString() }}</div>
         </div>
       </div>
       <TokenDetail />
@@ -168,12 +168,12 @@ const currentStore = computed(() => activeProvider.value === "deepseek" ? dsStor
 
 const collapsedTitleTokens = computed(() => {
   if (activeProvider.value === "deepseek") {
-    return (dsStore.selectedDetailModel === "pro" ? dsStore.currentDayProTokens : dsStore.currentDayFlashTokens).toLocaleString();
+    return (dsStore.selectedDetailModel === "v4flash" ? dsStore.currentDayV4flashTokens : dsStore.currentDayFlashTokens).toLocaleString();
   }
   return (mimoSettings.selectedDetailModel === "v25pro" ? mimoStore.currentDayProTokens : mimoStore.currentDayFlashTokens).toLocaleString();
 });
 const collapsedTitleModelLabel = computed(() => {
-  if (activeProvider.value === "deepseek") return dsStore.selectedDetailModel === "pro" ? "V4 Pro" : "V4 Flash";
+  if (activeProvider.value === "deepseek") return dsStore.selectedDetailModel === "v4flash" ? "V4 Flash" : "V4.1 Flash";
   return mimoSettings.selectedDetailModel === "v25pro" ? "V2.5 Pro" : "V2.5";
 });
 
@@ -218,7 +218,16 @@ function setupResizeObserver() {
 
 function clearDragGuard() { dragGuard = false; if (dragGuardTimer) { clearTimeout(dragGuardTimer); dragGuardTimer = null; } }
 function onTitleEnter(e: MouseEvent) { if (dragGuard) return; mouseInside = true; if (e.clientX < 0 || e.clientX >= window.innerWidth) return; if (e.clientY < 0 || e.clientY >= window.innerHeight) return; if (docked.value && collapsed.value && settings.edgeSnapEnabled) collapsed.value = false; }
-function onTitleDown() { dragGuard = true; if (dragGuardTimer) clearTimeout(dragGuardTimer); dragGuardTimer = setTimeout(() => { dragGuard = false; }, 2000); }
+function onTitleDown(e: MouseEvent) {
+  const target = e.target as HTMLElement | null;
+  // 点击按钮等交互控件时不启用拖拽防护，避免鼠标移出界面后被阻塞贴边缩回
+  if (target && target.closest("button")) return;
+  dragGuard = true;
+  if (dragGuardTimer) clearTimeout(dragGuardTimer);
+  dragGuardTimer = setTimeout(() => { dragGuard = false; }, 2000);
+  // 松开鼠标立即解除拖拽防护，覆盖非按钮区域点击后移出的场景
+  window.addEventListener("mouseup", clearDragGuard, { once: true });
+}
 function onRootLeave() { mouseInside = false; if (dragGuard) return; if (docked.value && !collapsed.value && settings.edgeSnapEnabled) { collapsed.value = true; invoke("hide_trend_detail"); } }
 
 onMounted(async () => {
@@ -237,7 +246,7 @@ onMounted(async () => {
 
   // DS events
   listen("detail-model-changed", (event: { payload: any }) => {
-    if (event.payload === "pro" || event.payload === "flash") dsStore.selectedDetailModel = event.payload;
+    if (event.payload === "v4flash" || event.payload === "flash") dsStore.selectedDetailModel = event.payload;
     else if (event.payload === "v25pro" || event.payload === "v25") mimoStore.selectedDetailModel = event.payload;
   });
   listen("ds-login-complete", () => { invoke("ds_broadcast_refresh"); });

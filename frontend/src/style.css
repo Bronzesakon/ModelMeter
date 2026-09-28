@@ -256,10 +256,16 @@ body[data-win-version="10"] .rounded-md {
 /* Docked bar: reuse the RAW acrylic surface and clip the WebView compositor layer. */
 html.collapsed {
   background: transparent !important;
+  border-radius: 12px;
+  overflow: hidden;
+  clip-path: inset(0 round 12px);
 }
 
 html.collapsed #app {
   background: transparent !important;
+  border-radius: inherit;
+  overflow: hidden;
+  clip-path: inherit;
 }
 
 body.collapsed {
@@ -273,4 +279,168 @@ body.collapsed {
 html.dark body.collapsed {
   background: rgba(24, 24, 27, 0.3) !important;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+/* The main panel also folds into the docked bar. Its normal opaque surface
+   must disappear while collapsed so the rounded acrylic host remains visible. */
+body.collapsed .main-surface {
+  background: transparent !important;
+}
+
+/* SevnX desktop surface language: applies to the main/settings windows only.
+   The docked widget intentionally keeps its existing acrylic surface. */
+:root {
+  --sevnx-canvas: #f7f6f3;
+  --sevnx-surface: #ffffff;
+  --sevnx-surface-soft: #fbfbfa;
+  --sevnx-text: #2f3437;
+  --sevnx-muted: #787774;
+  --sevnx-faint: #9c9b97;
+  --sevnx-border: #eaeaea;
+  --sevnx-border-strong: #dcdcd9;
+  --sevnx-accent: #273137;
+}
+
+html:not(.dark) .main-surface,
+html:not(.dark) .settings-surface {
+  color: var(--sevnx-text);
+  background: var(--sevnx-canvas);
+  font-family: "Segoe UI Variable", "Segoe UI", "Helvetica Neue", sans-serif;
+}
+
+html.dark .main-surface,
+html.dark .settings-surface {
+  --sevnx-canvas: #1e2121;
+  --sevnx-surface: #262a2a;
+  --sevnx-surface-soft: #222626;
+  --sevnx-text: #e8e8e5;
+  --sevnx-muted: #b1b1aa;
+  --sevnx-faint: #84847f;
+  --sevnx-border: #393d3d;
+  --sevnx-border-strong: #4b5050;
+  --sevnx-accent: #ebebe8;
+  color: var(--sevnx-text);
+  background: var(--sevnx-canvas);
+  font-family: "Segoe UI Variable", "Segoe UI", "Helvetica Neue", sans-serif;
+}
+
+.main-surface,
+.settings-surface {
+  color: var(--sevnx-text);
+}
+
+.main-surface .title-bar,
+.settings-surface .title-bar {
+  min-height: 42px;
+  margin: -16px -16px 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--sevnx-border);
+  background: var(--sevnx-surface-soft);
+}
+
+.main-surface .title-btn,
+.settings-surface .title-btn {
+  width: 30px;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--sevnx-muted);
+  transition: background 150ms ease, border-color 150ms ease, color 150ms ease, transform 150ms ease;
+}
+
+.main-surface .title-btn:hover,
+.settings-surface .title-btn:hover {
+  border-color: var(--sevnx-border);
+  background: var(--sevnx-surface);
+  color: var(--sevnx-text);
+  box-shadow: none;
+}
+
+.main-surface .title-btn:active,
+.settings-surface .title-btn:active {
+  transform: scale(0.98);
+}
+
+.main-surface .title-btn.close-btn:hover,
+.settings-surface .title-btn.close-btn:hover {
+  border-color: #f1c9c8;
+  background: #fdebec;
+  color: #9f2f2d;
+}
+
+.main-surface .provider-toggle,
+.settings-surface .provider-toggle {
+  padding: 7px 9px 6px;
+  border: 1px solid var(--sevnx-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sevnx-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.main-surface .provider-toggle:hover,
+.settings-surface .provider-toggle:hover {
+  border-color: var(--sevnx-border-strong);
+  background: var(--sevnx-surface);
+  color: var(--sevnx-text);
+}
+
+.main-surface .glass-card,
+.settings-surface .glass-card {
+  border: 1px solid var(--sevnx-border);
+  border-radius: 8px;
+  background: var(--sevnx-surface);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.main-surface .glass-card:hover,
+.settings-surface .glass-card:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.035);
+}
+
+.main-surface .text-gray-500,
+.main-surface .text-gray-400,
+.settings-surface .text-gray-500,
+.settings-surface .text-gray-400 {
+  color: var(--sevnx-muted) !important;
+}
+
+.main-surface .text-gray-800,
+.main-surface .text-gray-700,
+.settings-surface .text-gray-800,
+.settings-surface .text-gray-700 {
+  color: var(--sevnx-text) !important;
+}
+
+.main-surface .text-2xl,
+.main-surface .text-xl,
+.settings-surface .text-2xl,
+.settings-surface .text-xl {
+  font-family: "Bahnschrift", "Segoe UI Variable", "Segoe UI", sans-serif;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.025em;
+}
+
+.main-surface button,
+.settings-surface button,
+.main-surface select,
+.settings-surface select {
+  font-family: inherit;
+}
+
+.settings-surface .glass-card {
+  padding: 13px !important;
+}
+
+.settings-surface .rounded-lg,
+.main-surface .rounded-lg {
+  border-radius: 8px;
+}
+
+.settings-surface .rounded-full,
+.main-surface .rounded-full {
+  border-radius: 999px;
 }

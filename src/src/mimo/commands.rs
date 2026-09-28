@@ -29,10 +29,33 @@ fn effective_today(now: &chrono::DateTime<Local>) -> String {
     };
     date.format("%Y-%m-%d").to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn local_dt(y: i32, m: u32, d: u32, h: u32) -> chrono::DateTime<Local> {
+        Local.with_ymd_and_hms(y, m, d, h, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn effective_today_cutoff_at_7am() {
+        assert_eq!(effective_today(&local_dt(2026, 9, 10, 6)), "2026-09-09");
+        assert_eq!(effective_today(&local_dt(2026, 9, 10, 7)), "2026-09-10");
+        assert_eq!(effective_today(&local_dt(2026, 9, 10, 23)), "2026-09-10");
+    }
+
+    #[test]
+    fn effective_today_handles_month_boundary() {
+        assert_eq!(effective_today(&local_dt(2026, 1, 1, 0)), "2025-12-31");
+    }
+}
 use tauri::{Emitter, Manager};
 
 #[tauri::command]
 pub async fn mimo_refresh_data(
+    app: tauri::AppHandle,
     storage: tauri::State<'_, Arc<Storage>>,
     api_state: tauri::State<'_, ApiState>,
 ) -> Result<DashboardData, String> {
@@ -40,7 +63,7 @@ pub async fn mimo_refresh_data(
         return api_state.cached_data().ok_or_else(|| "refresh_in_progress".into());
     }
     let _guard = RefreshGuard::new(&api_state.is_refreshing);
-    let result = perform_refresh(&storage, &api_state).await;
+    let result = perform_refresh(&storage, &api_state, Some(&app)).await;
     if let Ok(ref data) = result {
         api_state.cache_data(data);
     }
@@ -54,7 +77,32 @@ pub fn mimo_get_cached_data(
     api_state.cached_data()
 }
 
-pub(crate) async fn perform_refresh(storage: &Storage, api_state: &ApiState) -> Result<DashboardData, String> {
+#[tauri::command]
+pub fn mimo_has_platform_session(api_state: tauri::State<'_, ApiState>) -> bool {
+    api_state.has_platform_session()
+}
+
+pub(crate) async fn perform_refresh(
+    storage: &Storage,
+    api_state: &ApiState,
+    app: Option<&tauri::AppHandle>,
+) -> Result<DashboardData, String> {
+    let (data, unauth) = mimo_refresh_once(storage, api_state).await?;
+    if unauth {
+        if let Some(app) = app {
+            crate::debug_log!("[mimo-refresh] 检测到登录失效，尝试静默重抓");
+            if crate::mimo::login::silent_refresh_session(app).await {
+                crate::debug_log!("[mimo-refresh] 静默重抓成功，重新刷新");
+                let (data2, _) = mimo_refresh_once(storage, api_state).await?;
+                return Ok(data2);
+            }
+            crate::debug_log!("[mimo-refresh] 静默重抓失败，保持失效状态");
+        }
+    }
+    Ok(data)
+}
+
+async fn mimo_refresh_once(storage: &Storage, api_state: &ApiState) -> Result<(DashboardData, bool), String> {
     let platform_cookies = api_state.platform_cookies.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let payment_mode = storage.load_setting("payment_mode").unwrap_or_else(|| "plan".to_string());
     let is_plan_mode = payment_mode != "token";
@@ -90,6 +138,7 @@ pub(crate) async fn perform_refresh(storage: &Storage, api_state: &ApiState) -> 
     };
 
     let mut errors: Vec<String> = Vec::new();
+    let mut unauth = false;
 
     if let Some(ref cookies) = platform_cookies {
         let now = Local::now();
@@ -203,23 +252,21 @@ pub(crate) async fn perform_refresh(storage: &Storage, api_state: &ApiState) -> 
                 }
             }
 
-            has_platform_unauth = balance_res.as_ref().err().map_or(false, |e| e.is_auth_error())
-                || detail_res.as_ref().err().map_or(false, |e| e.is_auth_error())
-                || detail_prev_res.as_ref().err().map_or(false, |e| e.is_auth_error())
-                || plan_res.as_ref().err().map_or(false, |e| e.is_auth_error())
-                || plan_usage_res.as_ref().err().map_or(false, |e| e.is_auth_error());
+            has_platform_unauth = balance_res.as_ref().err().map_or(false, |e| e.is_auth_error());
 
             if has_platform_unauth {
+                unauth = true;
+                storage.clear_mimo_platform_cookies();
                 *api_state.platform_cookies.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 data.is_account_available = false;
                 data.has_platform_session = false;
                 if !errors.contains(&platform_unauth_msg) { errors.push(platform_unauth_msg.clone()); }
             }
             if let Err(ref e) = balance_res { let msg = e.to_string(); if !errors.contains(&msg) { errors.push(msg); } }
-            if let Err(ref e) = detail_res { let msg = e.to_string(); if !errors.contains(&msg) { errors.push(msg); } }
-            if let Err(ref e) = detail_prev_res { let msg = e.to_string(); if !msg.contains("skip") && !errors.contains(&msg) { errors.push(msg); } }
-            if let Err(ref e) = plan_res { let msg = e.to_string(); if !errors.contains(&msg) { errors.push(msg); } }
-            if let Err(ref e) = plan_usage_res { let msg = e.to_string(); if !errors.contains(&msg) { errors.push(msg); } }
+            if let Err(ref e) = detail_res { let msg = e.to_string(); if !e.is_auth_error() && !errors.contains(&msg) { errors.push(msg); } }
+            if let Err(ref e) = detail_prev_res { let msg = e.to_string(); if !e.is_auth_error() && !msg.contains("skip") && !errors.contains(&msg) { errors.push(msg); } }
+            if let Err(ref e) = plan_res { let msg = e.to_string(); if !e.is_auth_error() && !errors.contains(&msg) { errors.push(msg); } }
+            if let Err(ref e) = plan_usage_res { let msg = e.to_string(); if !e.is_auth_error() && !errors.contains(&msg) { errors.push(msg); } }
 
         } else {
             let (balance_res, detail_res, detail_prev_res, monthly_bill_res) = tokio::join!(
@@ -317,21 +364,20 @@ pub(crate) async fn perform_refresh(storage: &Storage, api_state: &ApiState) -> 
             }
             data.current_month_cost = month_cost;
 
-            has_platform_unauth = balance_res.as_ref().err().map_or(false, |e| e.is_auth_error())
-                || detail_res.as_ref().err().map_or(false, |e| e.is_auth_error())
-                || detail_prev_res.as_ref().err().map_or(false, |e| e.is_auth_error())
-                || monthly_bill_res.as_ref().err().map_or(false, |e| e.is_auth_error());
+            has_platform_unauth = balance_res.as_ref().err().map_or(false, |e| e.is_auth_error());
 
             if has_platform_unauth {
+                unauth = true;
+                storage.clear_mimo_platform_cookies();
                 *api_state.platform_cookies.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 data.is_account_available = false;
                 data.has_platform_session = false;
                 if !errors.contains(&platform_unauth_msg) { errors.push(platform_unauth_msg.clone()); }
             }
             if let Err(ref e) = balance_res { let msg = e.to_string(); if !errors.contains(&msg) { errors.push(msg); } }
-            if let Err(ref e) = detail_res { let msg = e.to_string(); if !errors.contains(&msg) { errors.push(msg); } }
-            if let Err(ref e) = detail_prev_res { let msg = e.to_string(); if !msg.contains("skip") && !errors.contains(&msg) { errors.push(msg); } }
-            if let Err(ref e) = monthly_bill_res { let msg = e.to_string(); if !errors.contains(&msg) { errors.push(msg); } }
+            if let Err(ref e) = detail_res { let msg = e.to_string(); if !e.is_auth_error() && !errors.contains(&msg) { errors.push(msg); } }
+            if let Err(ref e) = detail_prev_res { let msg = e.to_string(); if !e.is_auth_error() && !msg.contains("skip") && !errors.contains(&msg) { errors.push(msg); } }
+            if let Err(ref e) = monthly_bill_res { let msg = e.to_string(); if !e.is_auth_error() && !errors.contains(&msg) { errors.push(msg); } }
         }
 
         if !all_records.is_empty() {
@@ -445,13 +491,6 @@ pub(crate) async fn perform_refresh(storage: &Storage, api_state: &ApiState) -> 
         }
     }
 
-    if platform_cookies.is_none() && storage.has_saved_mimo_platform_cookies() {
-        let expired_msg = api::ApiError::PlatformUnauthorized.to_string();
-        if !errors.contains(&expired_msg) {
-            errors.push(expired_msg);
-        }
-    }
-
     let unauth_msg = api::ApiError::PlatformUnauthorized.to_string();
     if errors.iter().any(|e| *e == unauth_msg) {
         errors.retain(|e| *e == unauth_msg);
@@ -462,7 +501,7 @@ pub(crate) async fn perform_refresh(storage: &Storage, api_state: &ApiState) -> 
     }
 
     api_state.cache_data(&data);
-    Ok(data)
+    Ok((data, unauth))
 }
 
 #[tauri::command]
@@ -720,7 +759,7 @@ pub async fn mimo_broadcast_refresh(
         return Ok(());
     }
     let _guard = RefreshGuard::new(&api_state.is_refreshing);
-    let result = perform_refresh(&storage, &api_state).await;
+    let result = perform_refresh(&storage, &api_state, Some(&app)).await;
     if let Ok(data) = result {
         api_state.cache_data(&data);
         let _ = app.emit("mimo-trigger-refresh", data);
@@ -748,7 +787,7 @@ pub async fn broadcast_payment_mode(
     // 前端 applyData 时同步切换 paymentMode，保证数据与模式在同一事件中更新，避免闪烁
     if !api_state.is_refreshing.swap(true, Ordering::Acquire) {
         let _guard = RefreshGuard::new(&api_state.is_refreshing);
-        match perform_refresh(&storage, &api_state).await {
+        match perform_refresh(&storage, &api_state, Some(&app)).await {
             Ok(data) => {
                 api_state.cache_data(&data);
                 let _ = app.emit("mimo-trigger-refresh", &data);
@@ -845,6 +884,7 @@ pub fn get_monitor_top_y(
 
 #[tauri::command]
 pub async fn do_refresh(
+    app: tauri::AppHandle,
     storage: tauri::State<'_, Arc<Storage>>,
     api_state: tauri::State<'_, ApiState>,
 ) -> Result<DashboardData, String> {
@@ -852,7 +892,7 @@ pub async fn do_refresh(
         return api_state.cached_data().ok_or_else(|| "refresh_in_progress".into());
     }
     let _guard = RefreshGuard::new(&api_state.is_refreshing);
-    let result = perform_refresh(&storage, &api_state).await;
+    let result = perform_refresh(&storage, &api_state, Some(&app)).await;
     if let Ok(ref data) = result {
         api_state.cache_data(data);
     }
@@ -864,7 +904,7 @@ pub async fn do_refresh_inner(
     storage: &Storage,
     api_state: &ApiState,
 ) -> Result<DashboardData, String> {
-    perform_refresh(storage, api_state).await
+    perform_refresh(storage, api_state, None).await
 }
 
 #[tauri::command]

@@ -36,6 +36,7 @@ use tauri::{Emitter, Manager};
 
 #[tauri::command]
 pub async fn ds_refresh_data(
+    app: tauri::AppHandle,
     storage: tauri::State<'_, Arc<Storage>>,
     api_state: tauri::State<'_, ApiState>,
 ) -> Result<DashboardData, String> {
@@ -43,7 +44,7 @@ pub async fn ds_refresh_data(
         return api_state.cached_data().ok_or_else(|| "refresh_in_progress".into());
     }
     let _guard = RefreshGuard::new(&api_state.is_refreshing);
-    let result = do_refresh(&storage, &api_state).await;
+    let result = do_refresh(&storage, &api_state, Some(&app)).await;
     if let Ok(ref data) = result {
         api_state.cache_data(data);
     }
@@ -57,7 +58,32 @@ pub fn ds_get_cached_data(
     api_state.cached_data()
 }
 
-pub(crate) async fn do_refresh(storage: &Storage, api_state: &ApiState) -> Result<DashboardData, String> {
+#[tauri::command]
+pub fn ds_has_platform_session(api_state: tauri::State<'_, ApiState>) -> bool {
+    api_state.has_platform_session()
+}
+
+pub(crate) async fn do_refresh(
+    storage: &Storage,
+    api_state: &ApiState,
+    app: Option<&tauri::AppHandle>,
+) -> Result<DashboardData, String> {
+    let (data, unauth) = ds_refresh_once(storage, api_state).await?;
+    if unauth {
+        if let Some(app) = app {
+            crate::debug_log!("[ds-refresh] 检测到登录失效，尝试静默重抓");
+            if crate::ds::login::silent_refresh_session(app).await {
+                crate::debug_log!("[ds-refresh] 静默重抓成功，重新刷新");
+                let (data2, _) = ds_refresh_once(storage, api_state).await?;
+                return Ok(data2);
+            }
+            crate::debug_log!("[ds-refresh] 静默重抓失败，保持失效状态");
+        }
+    }
+    Ok(data)
+}
+
+async fn ds_refresh_once(storage: &Storage, api_state: &ApiState) -> Result<(DashboardData, bool), String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .connect_timeout(std::time::Duration::from_secs(10))
@@ -74,14 +100,14 @@ pub(crate) async fn do_refresh(storage: &Storage, api_state: &ApiState) -> Resul
         topped_up_balance: 0.0,
         balance_info: None,
         flash_usage: None,
-        pro_usage: None,
+        v4flash_usage: None,
         flash_daily_usage: vec![],
-        pro_daily_usage: vec![],
+        v4flash_daily_usage: vec![],
         current_day_cost: 0.0,
         current_month_cost: 0.0,
         current_day_requests: 0,
         current_day_flash_tokens: 0,
-        current_day_pro_tokens: 0,
+        current_day_v4flash_tokens: 0,
         has_platform_session: platform_token.is_some(),
         is_first_launch: storage.is_first_launch(),
         last_updated: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
@@ -90,6 +116,7 @@ pub(crate) async fn do_refresh(storage: &Storage, api_state: &ApiState) -> Resul
     };
 
     let mut errors: Vec<String> = Vec::new();
+    let mut unauth = false;
 
     // Fetch balance via platform user_summary API (replaces api_key + fetch_balance)
     let mut summary_unauth = false;
@@ -126,9 +153,7 @@ pub(crate) async fn do_refresh(storage: &Storage, api_state: &ApiState) -> Resul
                 }
                 if matches!(e, api::ApiError::PlatformUnauthorized) {
                     summary_unauth = true;
-                }
-                if matches!(e, api::ApiError::NetworkError(_)) {
-                    summary_unauth = true;
+                    unauth = true;
                 }
             }
         }
@@ -138,6 +163,8 @@ pub(crate) async fn do_refresh(storage: &Storage, api_state: &ApiState) -> Resul
     if let Some(ref token) = platform_token {
         if summary_unauth {
             let platform_unauth_msg = api::ApiError::PlatformUnauthorized.to_string();
+            storage.clear_platform_token();
+            storage.clear_platform_cookies();
             *api_state.platform_token.lock().unwrap_or_else(|e| e.into_inner()) = None;
             *api_state.platform_cookies.lock().unwrap_or_else(|e| e.into_inner()) = None;
             data.has_platform_session = false;
@@ -164,10 +191,11 @@ pub(crate) async fn do_refresh(storage: &Storage, api_state: &ApiState) -> Resul
             }
             let platform_unauth_msg = api::ApiError::PlatformUnauthorized.to_string();
             let has_platform_unauth = matches!(&cost_res, Err(api::ApiError::PlatformUnauthorized))
-                || matches!(&amount_res, Err(api::ApiError::PlatformUnauthorized))
-                || matches!(&cost_res, Err(api::ApiError::NetworkError(_)))
-                || matches!(&amount_res, Err(api::ApiError::NetworkError(_)));
+                || matches!(&amount_res, Err(api::ApiError::PlatformUnauthorized));
             if has_platform_unauth {
+                unauth = true;
+                storage.clear_platform_token();
+                storage.clear_platform_cookies();
                 *api_state.platform_token.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 *api_state.platform_cookies.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 data.has_platform_session = false;
@@ -175,14 +203,6 @@ pub(crate) async fn do_refresh(storage: &Storage, api_state: &ApiState) -> Resul
                     errors.push(platform_unauth_msg);
                 }
             }
-        }
-    }
-
-    // 内存中无 token 但本地文件仍存在，说明被另一个窗口清除（token 已失效）
-    if platform_token.is_none() && storage.has_saved_platform_token() {
-        let expired_msg = api::ApiError::PlatformUnauthorized.to_string();
-        if !errors.contains(&expired_msg) {
-            errors.push(expired_msg);
         }
     }
 
@@ -197,9 +217,9 @@ pub(crate) async fn do_refresh(storage: &Storage, api_state: &ApiState) -> Resul
 
     // Extract today's per-model tokens from daily usage (works with both platform & legacy data)
     let today_str = effective_today(&Local::now());
-    if data.current_day_pro_tokens == 0 {
-        if let Some(p) = data.pro_daily_usage.iter().find(|p| p.date == today_str) {
-            data.current_day_pro_tokens = p.total_tokens as i64;
+    if data.current_day_v4flash_tokens == 0 {
+        if let Some(p) = data.v4flash_daily_usage.iter().find(|p| p.date == today_str) {
+            data.current_day_v4flash_tokens = p.total_tokens as i64;
         }
     }
     if data.current_day_flash_tokens == 0 {
@@ -209,7 +229,7 @@ pub(crate) async fn do_refresh(storage: &Storage, api_state: &ApiState) -> Resul
     }
 
     api_state.cache_data(&data);
-    Ok(data)
+    Ok((data, unauth))
 }
 
 fn apply_platform_amount(
@@ -221,24 +241,19 @@ fn apply_platform_amount(
 
     if let Some(ref inner) = amount.data {
         if let Some(ref biz_data) = inner.biz_data {
-            // Monthly model summaries (from biz_data.total)
+            // Monthly model summaries (from biz_data.total)，未知模型不进卡片
             let mut month_flash_tokens: i64 = 0;
-            let mut month_pro_tokens: i64 = 0;
+            let mut month_v4flash_tokens: i64 = 0;
             for total_entry in &biz_data.total {
                 let model_total: i64 = total_entry.usage.iter()
                     .filter(|u| u.usage_type != "REQUEST")
                     .filter_map(|u| u.amount.parse::<i64>().ok())
                     .sum();
-                if api::is_pro_model(&total_entry.model) {
-                    month_pro_tokens += model_total;
+                match api::classify_model(&total_entry.model) {
+                    Some(DeepSeekModel::Flash) => month_flash_tokens += model_total,
+                    Some(DeepSeekModel::V4Flash) => month_v4flash_tokens += model_total,
+                    None => {}
                 }
-            }
-            // Prefer model with "flash" in name for flash category
-            if let Some(flash_model) = api::find_flash_model(&biz_data.total) {
-                month_flash_tokens = flash_model.usage.iter()
-                    .filter(|u| u.usage_type != "REQUEST")
-                    .filter_map(|u| u.amount.parse::<i64>().ok())
-                    .sum();
             }
 
             // Set model summaries (cost_in_cents via cost API separately)
@@ -251,12 +266,12 @@ fn apply_platform_amount(
                     cost_formatted: "¥0.00".into(),
                 });
             }
-            if month_pro_tokens > 0 {
-                data.pro_usage = Some(ModelUsageSummary {
-                    model: DeepSeekModel::Pro,
-                    total_tokens: month_pro_tokens as i32,
+            if month_v4flash_tokens > 0 {
+                data.v4flash_usage = Some(ModelUsageSummary {
+                    model: DeepSeekModel::V4Flash,
+                    total_tokens: month_v4flash_tokens as i32,
                     cost_in_cents: 0,
-                    total_tokens_formatted: api::format_number(month_pro_tokens as i32),
+                    total_tokens_formatted: api::format_number(month_v4flash_tokens as i32),
                     cost_formatted: "¥0.00".into(),
                 });
             }
@@ -269,16 +284,11 @@ fn apply_platform_amount(
                             .filter(|u| u.usage_type != "REQUEST")
                             .filter_map(|u| u.amount.parse::<i64>().ok())
                             .sum();
-                        if api::is_pro_model(&model_data.model) {
-                            data.current_day_pro_tokens = model_tokens;
+                        match api::classify_model(&model_data.model) {
+                            Some(DeepSeekModel::Flash) => data.current_day_flash_tokens = model_tokens,
+                            Some(DeepSeekModel::V4Flash) => data.current_day_v4flash_tokens = model_tokens,
+                            None => {}
                         }
-                    }
-                    // Prefer model with "flash" in name for flash category
-                    if let Some(flash_model) = api::find_flash_model(&day.data) {
-                        data.current_day_flash_tokens = flash_model.usage.iter()
-                            .filter(|u| u.usage_type != "REQUEST")
-                            .filter_map(|u| u.amount.parse::<i64>().ok())
-                            .sum();
                     }
                     data.current_day_requests = day.data.iter()
                         .flat_map(|m| &m.usage)
@@ -289,8 +299,8 @@ fn apply_platform_amount(
                 }
             }
             // Populate daily usage arrays
-            data.flash_daily_usage = api::build_daily_from_platform(&biz_data.days, false);
-            data.pro_daily_usage = api::build_daily_from_platform(&biz_data.days, true);
+            data.flash_daily_usage = api::build_daily_from_platform(&biz_data.days, DeepSeekModel::Flash);
+            data.v4flash_daily_usage = api::build_daily_from_platform(&biz_data.days, DeepSeekModel::V4Flash);
         }
     }
 
@@ -307,7 +317,7 @@ fn apply_platform_cost(
     let current_month = now.month();
 
     let mut flash_cost_map: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
-    let mut pro_cost_map: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+    let mut v4flash_cost_map: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
 
     if let Some(ref inner) = cost.data {
         if let Some(ref biz_data_list) = inner.biz_data {
@@ -324,13 +334,13 @@ fn apply_platform_cost(
                     }
 
                     // Extract per-model daily cost
-                    if let Some(flash_model) = api::find_flash_model(&day.data) {
+                    if let Some(flash_model) = api::find_model(&day.data, DeepSeekModel::Flash) {
                         let cost_cents = (sum_model_cost(flash_model) * 100.0).round() as i32;
                         flash_cost_map.insert(day.date.clone(), cost_cents);
                     }
-                    if let Some(pro_model) = day.data.iter().find(|m| api::is_pro_model(&m.model)) {
-                        let cost_cents = (sum_model_cost(pro_model) * 100.0).round() as i32;
-                        pro_cost_map.insert(day.date.clone(), cost_cents);
+                    if let Some(v4flash_model) = api::find_model(&day.data, DeepSeekModel::V4Flash) {
+                        let cost_cents = (sum_model_cost(v4flash_model) * 100.0).round() as i32;
+                        v4flash_cost_map.insert(day.date.clone(), cost_cents);
                     }
                 }
             }
@@ -343,8 +353,8 @@ fn apply_platform_cost(
             point.cost_in_cents = cents;
         }
     }
-    for point in &mut data.pro_daily_usage {
-        if let Some(&cents) = pro_cost_map.get(&point.date) {
+    for point in &mut data.v4flash_daily_usage {
+        if let Some(&cents) = v4flash_cost_map.get(&point.date) {
             point.cost_in_cents = cents;
         }
     }
@@ -366,6 +376,55 @@ fn sum_model_cost(model_data: &PlatformModelData) -> f64 {
         .iter()
         .filter_map(|u| u.amount.parse::<f64>().ok())
         .sum::<f64>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn local_dt(y: i32, m: u32, d: u32, h: u32) -> chrono::DateTime<Local> {
+        Local.with_ymd_and_hms(y, m, d, h, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn effective_today_cutoff_at_8am() {
+        // 8 点前仍算前一天，8 点起算当天
+        assert_eq!(effective_today(&local_dt(2026, 9, 10, 7)), "2026-09-09");
+        assert_eq!(effective_today(&local_dt(2026, 9, 10, 8)), "2026-09-10");
+        assert_eq!(effective_today(&local_dt(2026, 9, 10, 23)), "2026-09-10");
+    }
+
+    #[test]
+    fn effective_today_handles_month_boundary() {
+        assert_eq!(effective_today(&local_dt(2026, 9, 1, 3)), "2026-08-31");
+    }
+
+    fn entry(kind: &str, amount: &str) -> PlatformUsageEntry {
+        PlatformUsageEntry { usage_type: kind.to_string(), amount: amount.to_string() }
+    }
+
+    #[test]
+    fn sum_costs_skip_unparsable_amounts() {
+        let models = vec![
+            PlatformModelData {
+                model: "deepseek-v4-flash".to_string(),
+                usage: vec![entry("PROMPT_TOKEN", "0.5"), entry("REQUEST", "not-a-number")],
+            },
+            PlatformModelData {
+                model: "deepseek-flash".to_string(),
+                usage: vec![entry("RESPONSE_TOKEN", "1.25")],
+            },
+        ];
+        assert!((sum_day_cost(&models) - 1.75).abs() < 1e-9);
+        assert!((sum_model_cost(&models[0]) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sum_model_cost_empty_is_zero() {
+        let empty = PlatformModelData { model: "x".to_string(), usage: vec![] };
+        assert_eq!(sum_model_cost(&empty), 0.0);
+    }
 }
 
 #[tauri::command]
@@ -624,7 +683,7 @@ pub async fn ds_broadcast_refresh(
         return Ok(());
     }
     let _guard = RefreshGuard::new(&api_state.is_refreshing);
-    let result = do_refresh(&storage, &api_state).await;
+    let result = do_refresh(&storage, &api_state, Some(&app)).await;
     if let Ok(data) = result {
         api_state.cache_data(&data);
         let _ = app.emit("ds-trigger-refresh", data);

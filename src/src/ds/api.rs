@@ -2,34 +2,8 @@ use crate::ds::models::*;
 use reqwest::Client;
 use std::sync::{Mutex, atomic::AtomicBool};
 
-#[derive(Debug, Clone)]
-pub enum ApiError {
-    Unauthorized,
-    RateLimited,
-    ServerError(u16),
-    HttpError(u16),
-    NetworkError(String),
-    DecodingError(String),
-    InvalidResponse,
-    PlatformError(u16, String),
-    PlatformUnauthorized,
-}
-
-impl std::fmt::Display for ApiError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ApiError::Unauthorized => write!(f, "认证无效或已过期，请重新登录"),
-            ApiError::RateLimited => write!(f, "请求过于频繁，请稍后重试"),
-            ApiError::ServerError(c) => write!(f, "服务器错误 ({})", c),
-            ApiError::HttpError(c) => write!(f, "HTTP 错误 ({})", c),
-            ApiError::NetworkError(_) => write!(f, "网络连接失败，请检查网络设置"),
-            ApiError::DecodingError(m) => write!(f, "数据解析错误: {}", m),
-            ApiError::InvalidResponse => write!(f, "服务器返回无效响应"),
-            ApiError::PlatformError(c, m) => write!(f, "平台API HTTP {}: {}", c, m),
-            ApiError::PlatformUnauthorized => write!(f, "登录无效或已过期，请重新登录"),
-        }
-    }
-}
+/// 复用统一错误类型（变体与历史代码兼容）。
+pub use crate::error::AppError as ApiError;
 
 pub struct ApiState {
     pub platform_token: Mutex<Option<String>>,
@@ -225,21 +199,29 @@ pub async fn fetch_user_summary(
     Ok(resp)
 }
 
-// MARK: - Model name matching (same logic as C# IsProModel / IsFlashModel)
+// MARK: - Model name normalization (上游 JayHome137/DeepSeekMonitor v1.6 口径)
+//
+// 官方 Usage 导出当前只含两类 flash 名称：deepseek-flash（V4.1 Flash，新模型）
+// 与 deepseek-v4-flash（V4 Flash，旧名称）。采用白名单精确匹配：只接受当前
+// 名称与明确列出的历史别名，未知名称（deepseek-reasoner、未来的
+// deepseek-v5-flash 等）一律返回 None，避免误计入现有模型卡片。
 
-pub(crate) fn is_pro_model(model: &str) -> bool {
-    let lower = model.to_lowercase();
-    lower.contains("pro") || lower.contains("reasoner")
+pub(crate) fn classify_model(model: &str) -> Option<DeepSeekModel> {
+    match model.trim().to_lowercase().as_str() {
+        "deepseek-flash" => Some(DeepSeekModel::Flash),
+        "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp" | "deepseek-chat" => {
+            Some(DeepSeekModel::V4Flash)
+        }
+        _ => None,
+    }
 }
 
-pub(crate) fn is_flash_model(model: &str) -> bool {
-    let lower = model.to_lowercase();
-    lower.contains("flash") || lower.contains("chat")
-}
-
-/// Find first flash-compatible model (matches "flash" or "chat" in name)
-pub(crate) fn find_flash_model<'a>(models: &'a [crate::ds::models::PlatformModelData]) -> Option<&'a crate::ds::models::PlatformModelData> {
-    models.iter().find(|m| is_flash_model(&m.model))
+/// Find first model belonging to the given bucket
+pub(crate) fn find_model<'a>(
+    models: &'a [crate::ds::models::PlatformModelData],
+    target: DeepSeekModel,
+) -> Option<&'a crate::ds::models::PlatformModelData> {
+    models.iter().find(|m| classify_model(&m.model) == Some(target))
 }
 
 // MARK: - Data Processing (ported from DashboardViewModel)
@@ -274,18 +256,13 @@ pub(crate) fn format_date_short(date_str: &str) -> String {
 /// Build daily usage from platform API amount response
 pub(crate) fn build_daily_from_platform(
     days: &[crate::ds::models::PlatformDayData],
-    is_pro: bool,
+    target: DeepSeekModel,
 ) -> Vec<crate::ds::models::ModelDailyUsagePoint> {
     use crate::ds::models::ModelDailyUsagePoint;
 
     let result: Vec<_> = days.iter()
         .filter_map(|day| {
-            // For flash models, prefer "flash" over "chat"
-            let model_data = if is_pro {
-                day.data.iter().find(|m| is_pro_model(&m.model))
-            } else {
-                find_flash_model(&day.data)
-            }?;
+            let model_data = find_model(&day.data, target)?;
             let mut total_tokens: i32 = 0;
             let mut cache_hit: i32 = 0;
             let mut cache_miss: i32 = 0;
@@ -326,4 +303,42 @@ pub(crate) fn build_daily_from_platform(
         .collect();
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ds::models::DeepSeekModel;
+
+    #[test]
+    fn classify_model_uses_current_and_historical_names_only() {
+        // 当前名称
+        assert_eq!(classify_model("deepseek-flash"), Some(DeepSeekModel::Flash));
+        assert_eq!(classify_model("deepseek-v4-flash"), Some(DeepSeekModel::V4Flash));
+        // 大小写与空白容错
+        assert_eq!(classify_model(" DEEPSEEK-FLASH "), Some(DeepSeekModel::Flash));
+        // 历史别名归入 V4 Flash（旧名称）桶
+        assert_eq!(classify_model("deepseek-v4-flash-vision-exp"), Some(DeepSeekModel::V4Flash));
+        assert_eq!(classify_model("deepseek-chat"), Some(DeepSeekModel::V4Flash));
+        // 未知/历史推理模型不入卡片，避免污染聚合
+        assert_eq!(classify_model("deepseek-reasoner"), None);
+        assert_eq!(classify_model("deepseek-v5-flash"), None);
+        assert_eq!(classify_model(""), None);
+    }
+
+    #[test]
+    fn find_model_picks_only_requested_bucket() {
+        let models = vec![
+            PlatformModelData {
+                model: "deepseek-v4-flash".to_string(),
+                usage: vec![],
+            },
+            PlatformModelData {
+                model: "deepseek-flash".to_string(),
+                usage: vec![],
+            },
+        ];
+        assert!(find_model(&models, DeepSeekModel::V4Flash).unwrap().model == "deepseek-v4-flash");
+        assert!(find_model(&models, DeepSeekModel::Flash).unwrap().model == "deepseek-flash");
+    }
 }

@@ -35,7 +35,11 @@ pub async fn start_login_flow(app: tauri::AppHandle) -> Result<(), String> {
                 return;
             }
 
-            let cookies = match extract_cookies(&app_for_poll) {
+            let cookies = match crate::windows::extract_webview_cookies(
+                &app_for_poll,
+                "login",
+                "https://platform.xiaomimimo.com",
+            ) {
                 Ok(c) if !c.is_empty() => c,
                 _ => continue,
             };
@@ -89,138 +93,7 @@ pub async fn start_login_flow(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
-fn extract_cookies(app: &tauri::AppHandle) -> Result<String, String> {
-    use std::sync::mpsc;
-    use webview2_com::GetCookiesCompletedHandler;
-    use webview2_com::Microsoft::Web::WebView2::Win32::*;
-    use windows_core::{Interface, PWSTR};
 
-    let win = app
-        .get_webview_window("login")
-        .ok_or("login window not found")?;
-
-    let (tx, rx) = mpsc::channel::<Result<String, String>>();
-
-    let tx_for_err = tx.clone();
-    let result = win.with_webview(move |platform_webview| unsafe {
-        let controller = platform_webview.controller();
-
-        let webview = match controller.CoreWebView2() {
-            Ok(wv) => wv,
-            Err(e) => {
-                let _ = tx.send(Err(format!("get webview failed: {}", e)));
-                return;
-            }
-        };
-
-        let webview2: ICoreWebView2_2 = match webview.cast() {
-            Ok(wv2) => wv2,
-            Err(e) => {
-                let _ = tx.send(Err(format!("cast failed: {}", e)));
-                return;
-            }
-        };
-
-        let cookie_mgr = match webview2.CookieManager() {
-            Ok(mgr) => mgr,
-            Err(e) => {
-                let _ = tx.send(Err(format!("CookieManager failed: {}", e)));
-                return;
-            }
-        };
-
-        let uri = windows_core::HSTRING::from("https://platform.xiaomimimo.com");
-
-        let handler = GetCookiesCompletedHandler::create(Box::new(
-            move |error_code: windows_core::Result<()>,
-                  cookie_list: Option<ICoreWebView2CookieList>|
-                  -> windows_core::Result<()> {
-                if let Err(e) = error_code {
-                    let _ = tx.send(Err(format!("GetCookies callback error: {}", e)));
-                    return Ok(());
-                }
-
-                let cookie_list = match cookie_list {
-                    Some(list) => list,
-                    None => {
-                        let _ = tx.send(Err("cookie_list is null".to_string()));
-                        return Ok(());
-                    }
-                };
-
-                let mut count: u32 = 0;
-                if let Err(e) = cookie_list.Count(&mut count) {
-                    let _ = tx.send(Err(format!("Count failed: {}", e)));
-                    return Ok(());
-                }
-
-                let mut parts = Vec::new();
-
-                for i in 0..count {
-                    let cookie = match cookie_list.GetValueAtIndex(i) {
-                        Ok(c) => c,
-                        Err(_) => continue,
-                    };
-
-                    let mut name_pwstr = PWSTR::null();
-                    let mut value_pwstr = PWSTR::null();
-
-                    if cookie.Name(&mut name_pwstr).is_err() {
-                        continue;
-                    }
-                    if cookie.Value(&mut value_pwstr).is_err() {
-                        windows::Win32::System::Com::CoTaskMemFree(
-                            Some(name_pwstr.as_ptr() as *const _),
-                        );
-                        continue;
-                    }
-
-                    let name = name_pwstr.to_string().unwrap_or_default();
-                    let value = value_pwstr.to_string().unwrap_or_default();
-
-                    windows::Win32::System::Com::CoTaskMemFree(
-                        Some(name_pwstr.as_ptr() as *const _),
-                    );
-                    windows::Win32::System::Com::CoTaskMemFree(
-                        Some(value_pwstr.as_ptr() as *const _),
-                    );
-
-                    if !name.is_empty() {
-                        let needs_quoting = value.contains('=')
-                            || value.contains(',')
-                            || value.contains(';')
-                            || value.contains(' ')
-                            || value.contains('"');
-                        let formatted_value = if needs_quoting
-                            && !value.starts_with('"')
-                            && !value.ends_with('"')
-                        {
-                            format!("\"{}\"", value.replace('"', "\\\""))
-                        } else {
-                            value
-                        };
-                        parts.push(format!("{}={}", name, formatted_value));
-                    }
-                }
-
-                let _ = tx.send(Ok(parts.join("; ")));
-                Ok(())
-            },
-        ));
-
-        if let Err(e) = cookie_mgr.GetCookies(&uri, &handler) {
-            let _ = tx_for_err.send(Err(format!("GetCookies call failed: {}", e)));
-        }
-    });
-
-    if let Err(e) = result {
-        return Err(format!("with_webview failed: {}", e));
-    }
-
-    rx.recv_timeout(std::time::Duration::from_secs(5))
-        .map_err(|_| "cookie extraction timed out".to_string())?
-}
 
 /// 清理 WebView2 存储的所有 cookie
 /// WebView2 所有窗口共享同一个用户数据目录, 从任意存在的 webview 获取 CookieManager 即可
@@ -268,7 +141,62 @@ pub fn clear_webview_cookies(_app: &tauri::AppHandle) -> bool {
     false
 }
 
-#[cfg(not(target_os = "windows"))]
-fn extract_cookies(_app: &tauri::AppHandle) -> Result<String, String> {
-    Err("cookie extraction only supported on Windows".to_string())
+/// 静默重抓 MiMo 登录态（隐藏窗口，不打扰用户）。成功返回 true 并更新状态与存储。
+pub async fn silent_refresh_session(app: &tauri::AppHandle) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use tauri::WebviewUrl;
+
+        if let Some(win) = app.get_webview_window("mimo-silent") {
+            let _ = win.close();
+        }
+
+        let win = match WebviewWindowBuilder::new(
+            app,
+            "mimo-silent",
+            WebviewUrl::External(
+                "https://platform.xiaomimimo.com/console/balance"
+                    .parse()
+                    .unwrap(),
+            ),
+        )
+        .title("mimo silent")
+        .inner_size(480.0, 720.0)
+        .visible(false)
+        .build()
+        {
+            Ok(w) => w,
+            Err(_) => return false,
+        };
+
+        for _ in 0..15 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let cookies = match crate::windows::extract_webview_cookies(
+                app,
+                "mimo-silent",
+                "https://platform.xiaomimimo.com",
+            ) {
+                Ok(c) if !c.is_empty() => c,
+                _ => continue,
+            };
+            if crate::mimo::api::fetch_balance(Some(cookies.as_str())).await.is_ok() {
+                let api_state = app.state::<crate::mimo::api::ApiState>();
+                *api_state
+                    .platform_cookies
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(cookies.clone());
+                let storage = app.state::<Arc<Storage>>();
+                storage.save_mimo_platform_cookies(&cookies).ok();
+                storage.save_onboarding_completed();
+                let _ = win.close();
+                return true;
+            }
+        }
+        let _ = win.close();
+        false
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
 }

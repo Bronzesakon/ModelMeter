@@ -39,17 +39,14 @@ pub async fn start_login_flow(app: tauri::AppHandle) -> Result<(), String> {
             let url_str = url.to_string();
             if url_str.starts_with("https://dsm.local/token") {
                 let mut token = String::new();
-                let mut cookies = String::new();
 
                 if let Some(query) = url_str.split('?').nth(1) {
                     for pair in query.split('&') {
                         let mut parts = pair.splitn(2, '=');
                         let key = parts.next().unwrap_or("");
                         let val = parts.next().unwrap_or("");
-                        match key {
-                            "t" => token = urlencoding::decode(val).unwrap_or_default().into_owned(),
-                            "c" => cookies = urlencoding::decode(val).unwrap_or_default().into_owned(),
-                            _ => {}
+                        if key == "t" {
+                            token = urlencoding::decode(val).unwrap_or_default().into_owned();
                         }
                     }
                 }
@@ -58,22 +55,30 @@ pub async fn start_login_flow(app: tauri::AppHandle) -> Result<(), String> {
                     let api_state = app_for_nav.state::<crate::ds::api::ApiState>();
                     *api_state.platform_token.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(token.clone());
-                    if !cookies.is_empty() {
-                        *api_state.platform_cookies.lock().unwrap_or_else(|e| e.into_inner()) =
-                            Some(cookies.clone());
-                    }
 
                     let storage = app_for_nav.state::<Arc<Storage>>();
                     storage.save_platform_token(&token).ok();
-                    if !cookies.is_empty() {
-                        storage.save_platform_cookies(&cookies).ok();
-                    }
                     storage.save_onboarding_completed();
 
-                    if let Some(win) = app_for_nav.get_webview_window("login") {
-                        let _ = win.close();
-                    }
-                    let _ = app_for_nav.emit("ds-login-complete", ());
+                    // 用 CookieManager 提取完整 cookie（含 HttpOnly），避免 document.cookie 缺失
+                    let app_for_cookie = app_for_nav.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Ok(cookies) = crate::windows::extract_webview_cookies(
+                            &app_for_cookie,
+                            "login",
+                            "https://platform.deepseek.com",
+                        ) {
+                            let api_state = app_for_cookie.state::<crate::ds::api::ApiState>();
+                            *api_state.platform_cookies.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Some(cookies.clone());
+                            let storage = app_for_cookie.state::<Arc<Storage>>();
+                            storage.save_platform_cookies(&cookies).ok();
+                        }
+                        if let Some(win) = app_for_cookie.get_webview_window("login") {
+                            let _ = win.close();
+                        }
+                        let _ = app_for_cookie.emit("ds-login-complete", ());
+                    });
                 }
 
                 false
@@ -95,8 +100,7 @@ pub async fn start_login_flow(app: tauri::AppHandle) -> Result<(), String> {
                         if (o && o.value) {
                             clearInterval(checkInterval);
                             var token = encodeURIComponent(o.value);
-                            var cookies = encodeURIComponent(document.cookie);
-                            window.location.href = 'https://dsm.local/token?t=' + token + '&c=' + cookies;
+                            window.location.href = 'https://dsm.local/token?t=' + token;
                         }
                     } catch(e) {}
                 }
@@ -122,4 +126,102 @@ pub async fn start_login_flow(app: tauri::AppHandle) -> Result<(), String> {
     });
 
     Ok(())
+}
+
+/// 静默重抓用的注入脚本：轮询 localStorage.userToken，通过 document.title 传递给后端。
+const DS_SILENT_POLL_JS: &str = r#"
+    (function() {
+        var iv = setInterval(function() {
+            var ut = localStorage.getItem('userToken');
+            if (ut) {
+                try {
+                    var o = JSON.parse(ut);
+                    if (o && o.value) {
+                        clearInterval(iv);
+                        document.title = 'DSM_SILENT:' + o.value;
+                    }
+                } catch(e) {}
+            }
+        }, 1000);
+    })();
+"#;
+
+/// 静默重抓 DeepSeek 登录态（隐藏窗口，不打扰用户）。成功返回 true 并更新状态与存储。
+pub async fn silent_refresh_session(app: &tauri::AppHandle) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use tauri::WebviewUrl;
+
+        if let Some(win) = app.get_webview_window("ds-silent") {
+            let _ = win.close();
+        }
+
+        let win = match WebviewWindowBuilder::new(
+            app,
+            "ds-silent",
+            WebviewUrl::External("https://platform.deepseek.com/usage".parse().unwrap()),
+        )
+        .title("ds silent")
+        .inner_size(480.0, 720.0)
+        .visible(false)
+        .build()
+        {
+            Ok(w) => w,
+            Err(_) => return false,
+        };
+
+        let app_for_poll = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            if let Some(win) = app_for_poll.get_webview_window("ds-silent") {
+                let _ = win.eval(DS_SILENT_POLL_JS);
+            }
+        });
+
+        // 轮询窗口标题提取 token，并提取完整 cookie（含 HttpOnly）
+        for _ in 0..25 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let title = win.title().unwrap_or_default();
+            let Some(rest) = title.strip_prefix("DSM_SILENT:") else {
+                continue;
+            };
+            let token = rest.to_string();
+            if token.is_empty() {
+                continue;
+            }
+            let cookies = crate::windows::extract_webview_cookies(
+                app,
+                "ds-silent",
+                "https://platform.deepseek.com",
+            )
+            .ok()
+            .filter(|c| !c.is_empty());
+
+            let api_state = app.state::<crate::ds::api::ApiState>();
+            *api_state
+                .platform_token
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(token.clone());
+            if let Some(ref c) = cookies {
+                *api_state
+                    .platform_cookies
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(c.clone());
+            }
+            let storage = app.state::<Arc<Storage>>();
+            storage.save_platform_token(&token).ok();
+            if let Some(ref c) = cookies {
+                storage.save_platform_cookies(c).ok();
+            }
+            storage.save_onboarding_completed();
+            let _ = win.close();
+            return true;
+        }
+        let _ = win.close();
+        false
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
 }
