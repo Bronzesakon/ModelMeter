@@ -70,9 +70,10 @@ jobs:
       - name: Unit tests
         shell: bash
         run: |
-          set -o pipefail
+          set +e
           npm test 2>&1 | tee vitest.log
-          status=$?
+          status=${PIPESTATUS[0]}
+          set -e
           if [ "$status" -ne 0 ]; then
             # 关键失败行以注解重新输出，匿名也能从 job 页面读到
             grep -aE "FAIL |AssertionError|expected|Test Files" vitest.log | head -15 | sed 's/^/::error::/' || true
@@ -103,12 +104,22 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      # generate_context! 在编译期校验 frontendDist 存在；测试 job 不构建前端，
+      # 放一个占位页即可（单测不加载资产，package job 仍嵌入真实 dist）
+      - name: Stub frontend dist
+        working-directory: src
+        shell: bash
+        run: |
+          mkdir -p ../frontend/dist
+          [ -f ../frontend/dist/index.html ] || printf '<!doctype html><title>stub</title>' > ../frontend/dist/index.html
+
       - name: Unit tests
         shell: bash
         run: |
-          set -o pipefail
+          set +e
           cargo test 2>&1 | tee cargo-test.log
-          status=$?
+          status=${PIPESTATUS[0]}
+          set -e
           if [ "$status" -ne 0 ]; then
             grep -aE "^error(\[|:)|panicked at|FAILED|failures:" cargo-test.log | head -15 | sed 's/^/::error::/' || true
             tail -60 cargo-test.log | sed 's/^/::error::/' || true
@@ -183,9 +194,10 @@ jobs:
         working-directory: src
         shell: bash
         run: |
-          set -o pipefail
+          set +e
           tauri build --config "{\"version\":\"${VERSION_NAME}\"}" 2>&1 | tee tauri-build.log
-          status=$?
+          status=${PIPESTATUS[0]}
+          set -e
           if [ "$status" -ne 0 ]; then
             grep -aE "^error(\[|:)|error:|failed to|panicked at" tauri-build.log | head -15 | sed 's/^/::error::/' || true
             tail -60 tauri-build.log | sed 's/^/::error::/' || true
